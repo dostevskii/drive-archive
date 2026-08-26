@@ -106,6 +106,17 @@ pub fn upsert_drive(conn: &Connection, vol: &Volume) -> Result<i64> {
     Ok(id)
 }
 
+/// 특정 하드에 지금 인덱싱되어 있는 항목 수.
+///
+/// 새 스캔 결과가 믿을 만한지 판단하는 기준값으로 쓴다.
+pub fn entry_count(conn: &Connection, drive_id: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM entries WHERE drive_id = ?1",
+        params![drive_id],
+        |r| r.get(0),
+    )?)
+}
+
 /// 스캔이 끝난 시각을 기록한다.
 pub fn mark_scanned(conn: &Connection, drive_id: i64) -> Result<()> {
     conn.execute(

@@ -3,7 +3,7 @@
 //! 여러 스레드로 병렬 순회하되 프로세스 우선순위를 낮춰 두므로,
 //! 스캔 중에도 사용자가 하던 작업이 느려지지 않는다.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use jwalk::WalkDir;
 use std::time::UNIX_EPOCH;
 
@@ -28,6 +28,7 @@ fn is_excluded(name: &str) -> bool {
 }
 
 /// 한 번의 스캔 결과.
+#[derive(Debug)]
 pub struct ScanResult {
     pub entries: Vec<Entry>,
     /// 권한 문제 등으로 읽지 못한 항목 수. 스캔 자체는 계속 진행된다.
@@ -45,6 +46,13 @@ pub fn scan_volume(vol: &Volume) -> Result<ScanResult> {
 /// 지정한 경로 아래를 모두 훑는다. 테스트에서는 임시 폴더를 넘긴다.
 pub fn scan_root(root: &str) -> Result<ScanResult> {
     let root_path = std::path::Path::new(root).to_path_buf();
+
+    // 루트를 못 읽으면 순회는 빈 결과를 정상인 것처럼 돌려준다. 그 결과를 인덱스에
+    // 반영하면 멀쩡한 항목이 전부 "삭제됨"으로 처리된다. 여기서 실패로 끊는다.
+    std::fs::read_dir(&root_path).with_context(|| {
+        format!("{root} 을(를) 읽을 수 없습니다. 하드가 분리되었을 수 있습니다.")
+    })?;
+
     let mut entries = Vec::new();
     let mut errors = 0usize;
 
@@ -199,5 +207,68 @@ mod tests {
         assert!(is_excluded("$Recycle.Bin"));
         assert!(is_excluded("system volume information"));
         assert!(!is_excluded("내 프로젝트"));
+    }
+
+    /// 하드가 분리되면 순회는 빈 결과를 정상처럼 돌려준다.
+    /// 그대로 반영하면 인덱스가 통째로 지워지므로, 스캔 단계에서 막아야 한다.
+    #[test]
+    fn 읽을_수_없는_루트는_빈_결과가_아니라_실패다() {
+        let err = scan_root("Z:\\없는드라이브").unwrap_err();
+        assert!(format!("{err:#}").contains("읽을 수 없습니다"));
+    }
+
+    #[test]
+    fn 스캔_직전에_사라진_폴더도_실패로_처리한다() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        drop(tmp);
+
+        assert!(scan_root(&path).is_err());
+    }
+
+    /// 사용자는 스캔이 도는 줄 모르고 탐색기에서 파일을 옮기거나 지운다.
+    /// 순회 도중 사라진 항목이 있어도 스캔 전체가 실패하면 안 된다.
+    #[test]
+    fn 스캔_도중_파일이_사라져도_끝까지_진행한다() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        for i in 0..3000 {
+            fs::write(root.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+
+        let victim = root.clone();
+        let mover = std::thread::spawn(move || {
+            // 탐색기에서 잘라내기·삭제·이름 변경을 하는 상황을 흉내 낸다.
+            for i in 0..3000 {
+                let _ = fs::remove_file(victim.join(format!("f{i}.txt")));
+                let _ = fs::rename(
+                    victim.join(format!("f{}.txt", i + 1)),
+                    victim.join(format!("r{i}.txt")),
+                );
+            }
+        });
+
+        let result = scan_root(&root.to_string_lossy()).unwrap();
+        mover.join().unwrap();
+
+        // 몇 개가 잡혔는지는 타이밍에 달렸다. 중요한 건 패닉 없이 끝났다는 것이다.
+        assert!(result.entries.len() <= 6000);
+    }
+
+    /// 스캔은 메타데이터만 읽는다. 파일 핸들을 붙들고 있으면
+    /// 사용자가 그 파일을 지우거나 옮기지 못하게 막게 된다.
+    #[test]
+    fn 스캔은_파일을_잠그지_않는다() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..500 {
+            fs::write(tmp.path().join(format!("f{i}.txt")), b"x").unwrap();
+        }
+
+        scan_root(&tmp.path().to_string_lossy()).unwrap();
+
+        for i in 0..500 {
+            fs::remove_file(tmp.path().join(format!("f{i}.txt")))
+                .unwrap_or_else(|e| panic!("f{i}.txt를 지울 수 없다 - 스캔이 잠그고 있다: {e}"));
+        }
     }
 }

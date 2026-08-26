@@ -198,6 +198,15 @@ pub fn list_external_volumes() -> Vec<Volume> {
     found
 }
 
+/// 같은 하드가 여전히 같은 자리에 붙어 있는지 확인한다.
+///
+/// 스캔이 끝난 뒤 부르면, 스캔 도중 하드가 분리됐는지 알 수 있다.
+/// 분리됐다면 볼륨 정보를 읽을 수 없고, 다른 하드가 그 문자를 차지했다면
+/// 시리얼이 달라진다.
+pub fn still_connected(vol: &Volume) -> bool {
+    volume_info(vol.letter).is_some_and(|(serial, _, _)| serial == vol.serial)
+}
+
 /// 특정 드라이브 문자를 외장 NTFS 볼륨으로 확인하고 정보를 읽는다.
 ///
 /// `scan E:` 처럼 사용자가 드라이브를 직접 지정했을 때 쓴다.
@@ -235,5 +244,33 @@ mod tests {
     fn 논리_드라이브에는_시스템_드라이브가_포함된다() {
         // 어떤 Windows 시스템에도 부팅 드라이브는 존재한다.
         assert!(!logical_drive_letters().is_empty());
+    }
+
+    #[test]
+    fn 사라진_볼륨은_연결되어_있지_않다고_판정한다() {
+        let gone = Volume {
+            letter: 'Z',
+            serial: "DEADBEEF".into(),
+            label: "없는하드".into(),
+            total_bytes: 0,
+            free_bytes: 0,
+        };
+        assert!(!still_connected(&gone));
+    }
+
+    #[test]
+    fn 시리얼이_다르면_다른_하드로_본다() {
+        // 실제로 존재하는 드라이브라도 시리얼이 맞지 않으면 같은 하드가 아니다.
+        let Some(letter) = logical_drive_letters().into_iter().next() else {
+            return;
+        };
+        let imposter = Volume {
+            letter,
+            serial: "00000000".into(),
+            label: "가짜".into(),
+            total_bytes: 0,
+            free_bytes: 0,
+        };
+        assert!(!still_connected(&imposter));
     }
 }

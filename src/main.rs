@@ -136,15 +136,22 @@ fn cmd_sync(force: bool) -> Result<()> {
     }
 
     for o in &outcomes {
-        if o.skipped {
-            println!("{} ({}:)  방금 스캔했으므로 건너뜀", o.label, o.letter);
-        } else if o.stats.has_changes() {
-            println!(
-                "{} ({}:)  추가 {} / 변경 {} / 삭제 {}",
-                o.label, o.letter, o.stats.added, o.stats.updated, o.stats.removed
-            );
-        } else {
-            println!("{} ({}:)  변경 없음 ({}개 항목)", o.label, o.letter, o.stats.unchanged);
+        match o {
+            sync::SyncOutcome::Skipped { label, letter } => {
+                println!("{label} ({letter}:)  방금 스캔했으므로 건너뜀");
+            }
+            sync::SyncOutcome::Updated { label, letter, stats } if stats.has_changes() => {
+                println!(
+                    "{label} ({letter}:)  추가 {} / 변경 {} / 삭제 {}",
+                    stats.added, stats.updated, stats.removed
+                );
+            }
+            sync::SyncOutcome::Updated { label, letter, stats } => {
+                println!("{label} ({letter}:)  변경 없음 ({}개 항목)", stats.unchanged);
+            }
+            sync::SyncOutcome::Failed { label, letter, reason } => {
+                println!("{label} ({letter}:)  반영하지 않음 - {reason}");
+            }
         }
     }
     Ok(())
