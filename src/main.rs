@@ -5,6 +5,8 @@
 
 mod db;
 mod elevation;
+mod install;
+mod mcp;
 mod scan;
 mod sync;
 mod task;
@@ -76,6 +78,15 @@ enum Cmd {
         name: String,
     },
 
+    /// 자동 인덱싱과 Claude 연결을 한 번에 설정합니다 (처음 쓸 때 한 번)
+    Install,
+
+    /// 자동 인덱싱과 Claude 연결을 해제합니다 (인덱스는 남습니다)
+    Uninstall,
+
+    /// MCP 서버를 실행합니다 (Claude가 자동으로 호출합니다)
+    Mcp,
+
     /// 외장하드 연결 시 자동 인덱싱하도록 작업 스케줄러에 등록합니다
     SetupTask,
 
@@ -100,6 +111,9 @@ fn run() -> Result<()> {
         Cmd::Drives { json } => cmd_drives(json),
         Cmd::Status { json } => cmd_status(json),
         Cmd::Forget { name } => cmd_forget(&name),
+        Cmd::Install => install::install(),
+        Cmd::Uninstall => install::uninstall(),
+        Cmd::Mcp => mcp::serve(),
         Cmd::SetupTask => cmd_setup_task(),
         Cmd::RemoveTask => cmd_remove_task(),
     }

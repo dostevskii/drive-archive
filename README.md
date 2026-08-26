@@ -42,10 +42,12 @@ MCP(Model Context Protocol) 서버를 내장하고 있어, Claude Desktop이나 
 | 항목 | 요구사항 |
 |---|---|
 | 운영체제 | **Windows 11 전용** |
-| 파일 시스템 | NTFS로 포맷된 외장하드 |
+| 파일 시스템 | **NTFS**로 포맷된 외장하드 |
 | 연결 방식 | USB |
 
 이 프로그램은 Windows 11에서 개발되었고 Windows 11에서만 동작합니다. Windows 10 이하나 macOS/Linux는 지원하지 않습니다.
+
+> **exFAT/FAT32 하드는 인덱싱되지 않습니다.** 하드가 목록에 나타나지 않는다면 파일 시스템을 먼저 확인하세요. PowerShell에서 `Get-Volume`을 실행하면 각 드라이브의 `FileSystem` 열에서 볼 수 있습니다.
 
 ---
 
@@ -69,6 +71,10 @@ MCP(Model Context Protocol) 서버를 내장하고 있어, Claude Desktop이나 
 - 외장하드 연결 시 자동 인덱싱하도록 작업 스케줄러에 등록
 - Claude Desktop과 Claude Code에 MCP 서버로 등록
 
+작업 스케줄러에 등록하려면 관리자 권한이 필요하므로 UAC 창이 뜹니다. '예'를 눌러 주세요.
+
+Claude 설정 파일은 기존 내용을 보존한 채 `drive-archive` 항목만 추가합니다. 등록 후에는 Claude를 완전히 종료했다가 다시 켜야 적용됩니다.
+
 ### 3. 하드 연결
 
 외장하드를 연결하면 자동으로 인덱싱이 시작됩니다. 진행 상황은 다음으로 확인합니다.
@@ -77,7 +83,7 @@ MCP(Model Context Protocol) 서버를 내장하고 있어, Claude Desktop이나 
 .\drive-archive.exe drives
 ```
 
-> 첫 인덱싱은 파일 수에 따라 수 분이 걸릴 수 있습니다. 백그라운드에서 낮은 우선순위로 동작하므로 다른 작업에는 지장이 없습니다.
+> 인덱싱은 빠릅니다. 1.8TB 하드의 22,661개 항목을 약 5초에 처리합니다. 낮은 우선순위로 동작하므로 하던 작업에 지장을 주지 않습니다.
 
 ### 제거
 
@@ -128,6 +134,16 @@ drive-archive drives
 | `drive-archive forget <라벨>` | 더 이상 쓰지 않는 하드를 인덱스에서 제거 |
 | `drive-archive mcp` | MCP 서버 실행 (Claude가 자동으로 호출) |
 | `drive-archive setup-task` / `remove-task` | 작업 스케줄러만 따로 등록/해제 |
+
+### Claude가 쓰는 도구
+
+MCP로 연결하면 Claude에게 다음 도구가 보입니다.
+
+| 도구 | 하는 일 |
+|---|---|
+| `search_files` | 이름으로 검색하고 어느 하드에 있는지 반환 |
+| `list_drives` | 하드 목록과 현재 연결 여부 |
+| `get_status` | 인덱스 통계 |
 
 ---
 
