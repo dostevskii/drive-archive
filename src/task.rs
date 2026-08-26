@@ -13,7 +13,11 @@ pub const TASK_NAME: &str = "drive-archive sync";
 /// 볼륨이 마운트될 때 Windows가 System 로그에 남기는 이벤트.
 ///
 /// 예: `볼륨 J: (\Device\HarddiskVolume27) 정상입니다. 작업이 필요 없습니다.`
-/// 섀도 복사본에서도 발생하지만, `sync`가 USB NTFS 볼륨만 걸러내므로 문제없다.
+/// 섀도 복사본에서도 발생하지만, `sync`가 USB 볼륨만 걸러내므로 문제없다.
+///
+/// 프로바이더 이름은 `Ntfs`지만 NTFS 전용이 아니다. exFAT 볼륨에서도 이 이벤트가
+/// 발생하는 것을 확인했다. 다만 모든 파일 시스템에서 발생한다고 보장할 수는 없어,
+/// 로그온 트리거를 함께 걸어 놓친 연결을 메운다.
 const MOUNT_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Path=&quot;System&quot;&gt;&lt;Select Path=&quot;System&quot;&gt;*[System[Provider[@Name='Microsoft-Windows-Ntfs'] and EventID=98]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;";
 
 /// 작업 정의 XML을 만든다.

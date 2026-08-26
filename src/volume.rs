@@ -1,8 +1,12 @@
-//! 연결된 외장 NTFS 볼륨을 찾아 식별한다.
+//! 연결된 외장 볼륨을 찾아 식별한다.
 //!
 //! 드라이브 문자는 연결 순서에 따라 바뀌므로 식별자로 쓸 수 없다.
-//! NTFS 볼륨 시리얼 번호를 안정적인 식별자로 사용하고,
+//! 볼륨 시리얼 번호를 안정적인 식별자로 사용하고,
 //! 볼륨 라벨은 사용자가 물리 라벨과 대조하는 이름으로만 쓴다.
+//!
+//! 파일 시스템으로 거르지 않는다. Windows가 드라이브 문자를 붙여 준 볼륨이면
+//! NTFS든 exFAT든 FAT32든 똑같이 읽을 수 있다. HFS+처럼 별도 드라이버가 필요한
+//! 형식도, 드라이버만 깔려 있으면 코드 변경 없이 그대로 잡힌다.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -23,15 +27,20 @@ const DRIVE_REMOVABLE: u32 = 2;
 /// `GetDriveTypeW` 반환값: 고정 디스크. USB 외장하드 대부분이 여기에 해당한다.
 const DRIVE_FIXED: u32 = 3;
 
-/// 연결되어 있는 외장 NTFS 볼륨 하나.
+/// 연결되어 있는 외장 볼륨 하나.
 #[derive(Debug, Clone, Serialize)]
 pub struct Volume {
     /// 드라이브 문자 하나 (예: `'E'`). 연결 때마다 바뀔 수 있다.
     pub letter: char,
-    /// NTFS 볼륨 시리얼 번호를 8자리 대문자 16진수로 표기한 것. 하드의 고유 식별자.
+    /// 볼륨 시리얼 번호를 8자리 대문자 16진수로 표기한 것. 하드의 고유 식별자.
     pub serial: String,
     /// 볼륨 라벨. 비어 있으면 `(라벨 없음)`으로 채운다.
     pub label: String,
+    /// 파일 시스템 이름 (`NTFS`, `exFAT`, `FAT32`, `ReFS`, `HFS+` 등).
+    ///
+    /// 어느 하드를 어떻게 포맷해 뒀는지 나중에 알아보기 위해 기록한다.
+    /// 읽을 수 없으면 `(알 수 없음)`.
+    pub filesystem: String,
     pub total_bytes: u64,
     pub free_bytes: u64,
 }
@@ -157,10 +166,10 @@ fn is_usb(letter: char) -> bool {
     desc.BusType == BusTypeUsb
 }
 
-/// 지금 연결된 외장 NTFS 볼륨을 모두 찾는다.
+/// 지금 연결된 외장 볼륨을 모두 찾는다.
 ///
-/// USB로 연결된 NTFS 볼륨만 반환한다. 내장 디스크, 네트워크 드라이브,
-/// NTFS가 아닌 볼륨(exFAT, FAT32 등)은 제외된다.
+/// USB로 연결된 볼륨을 파일 시스템과 무관하게 반환한다.
+/// 내장 디스크, 네트워크 드라이브, 광학 드라이브는 제외된다.
 pub fn list_external_volumes() -> Vec<Volume> {
     let mut found = Vec::new();
 
@@ -171,12 +180,10 @@ pub fn list_external_volumes() -> Vec<Volume> {
             continue;
         }
 
+        // 볼륨 정보를 읽지 못하면 미디어가 없는 드라이브다 (빈 카드리더 등).
         let Some((serial, label, fs)) = volume_info(letter) else {
             continue;
         };
-        if !fs.eq_ignore_ascii_case("NTFS") {
-            continue;
-        }
         if !is_usb(letter) {
             continue;
         }
@@ -189,6 +196,11 @@ pub fn list_external_volumes() -> Vec<Volume> {
                 "(라벨 없음)".to_string()
             } else {
                 label
+            },
+            filesystem: if fs.is_empty() {
+                "(알 수 없음)".to_string()
+            } else {
+                fs
             },
             total_bytes,
             free_bytes,
@@ -207,7 +219,7 @@ pub fn still_connected(vol: &Volume) -> bool {
     volume_info(vol.letter).is_some_and(|(serial, _, _)| serial == vol.serial)
 }
 
-/// 특정 드라이브 문자를 외장 NTFS 볼륨으로 확인하고 정보를 읽는다.
+/// 특정 드라이브 문자를 외장 볼륨으로 확인하고 정보를 읽는다.
 ///
 /// `scan E:` 처럼 사용자가 드라이브를 직접 지정했을 때 쓴다.
 pub fn volume_at(letter: char) -> Result<Volume> {
@@ -216,7 +228,7 @@ pub fn volume_at(letter: char) -> Result<Volume> {
         .into_iter()
         .find(|v| v.letter == letter)
         .with_context(|| {
-            format!("{letter}: 드라이브는 연결된 외장 NTFS 볼륨이 아닙니다. `drive-archive drives`로 목록을 확인하세요.")
+            format!("{letter}: 드라이브는 연결된 외장 볼륨이 아닙니다. `drive-archive drives`로 목록을 확인하세요.")
         })
 }
 
@@ -252,6 +264,7 @@ mod tests {
             letter: 'Z',
             serial: "DEADBEEF".into(),
             label: "없는하드".into(),
+            filesystem: "NTFS".into(),
             total_bytes: 0,
             free_bytes: 0,
         };
@@ -268,6 +281,7 @@ mod tests {
             letter,
             serial: "00000000".into(),
             label: "가짜".into(),
+            filesystem: "NTFS".into(),
             total_bytes: 0,
             free_bytes: 0,
         };

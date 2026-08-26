@@ -13,7 +13,9 @@ use crate::volume::Volume;
 /// 인덱싱에서 제외할 폴더 이름.
 ///
 /// 사용자 자료가 아니고, 일부는 접근 권한도 없어 오류만 낸다.
+/// 하드를 Mac에서도 쓰면 macOS가 만든 폴더가 함께 들어오므로 그것도 뺀다.
 const EXCLUDED_DIRS: &[&str] = &[
+    // Windows
     "System Volume Information",
     "$RECYCLE.BIN",
     "$Recycle.Bin",
@@ -21,6 +23,13 @@ const EXCLUDED_DIRS: &[&str] = &[
     "$WinREAgent",
     "Recovery",
     "found.000",
+    // macOS
+    ".Spotlight-V100",
+    ".Trashes",
+    ".fseventsd",
+    ".TemporaryItems",
+    ".DocumentRevisions-V100",
+    ".apdisk",
 ];
 
 fn is_excluded(name: &str) -> bool {
@@ -207,6 +216,17 @@ mod tests {
         assert!(is_excluded("$Recycle.Bin"));
         assert!(is_excluded("system volume information"));
         assert!(!is_excluded("내 프로젝트"));
+    }
+
+    #[test]
+    fn 맥이_만든_폴더도_제외한다() {
+        // Mac에서도 쓰는 하드에는 이런 폴더가 딸려 온다.
+        assert!(is_excluded(".Spotlight-V100"));
+        assert!(is_excluded(".Trashes"));
+        assert!(is_excluded(".fseventsd"));
+        // 사용자가 만든 점 폴더는 지켜야 한다.
+        assert!(!is_excluded(".git"));
+        assert!(!is_excluded(".작업폴더"));
     }
 
     /// 하드가 분리되면 순회는 빈 결과를 정상처럼 돌려준다.

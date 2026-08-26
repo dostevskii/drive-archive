@@ -47,6 +47,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             id            INTEGER PRIMARY KEY,
             volume_serial TEXT    NOT NULL UNIQUE,
             label         TEXT    NOT NULL,
+            filesystem    TEXT    NOT NULL DEFAULT '(알 수 없음)',
             total_bytes   INTEGER NOT NULL DEFAULT 0,
             free_bytes    INTEGER NOT NULL DEFAULT 0,
             first_seen    TEXT    NOT NULL,
@@ -70,7 +71,36 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         "#,
     )
     .context("스키마를 만들 수 없습니다")?;
+
+    migrate(conn)?;
     Ok(())
+}
+
+/// 예전 버전이 만든 인덱스를 현재 스키마로 맞춘다.
+///
+/// `CREATE TABLE IF NOT EXISTS`는 이미 있는 표를 건드리지 않으므로,
+/// 뒤늦게 생긴 열은 여기서 따로 붙여 준다. 인덱싱해 둔 내용은 그대로 둔다.
+fn migrate(conn: &Connection) -> Result<()> {
+    if !has_column(conn, "drives", "filesystem")? {
+        conn.execute(
+            "ALTER TABLE drives ADD COLUMN filesystem TEXT NOT NULL DEFAULT '(알 수 없음)'",
+            [],
+        )
+        .context("인덱스에 파일 시스템 열을 추가할 수 없습니다")?;
+    }
+    Ok(())
+}
+
+/// 표에 해당 열이 있는지 확인한다.
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if row.get::<_, String>(1)? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// 현재 시각을 DB에 저장할 문자열로 만든다.
@@ -80,21 +110,29 @@ fn now() -> String {
 
 /// 볼륨을 등록하거나 기존 등록 정보를 갱신하고 `drives.id`를 돌려준다.
 ///
-/// 볼륨 시리얼이 같으면 같은 하드로 본다. 라벨을 바꿔 달았거나
+/// 볼륨 시리얼이 같으면 같은 하드로 본다. 라벨을 바꿔 달았거나 다시 포맷했거나
 /// 파일을 지워 여유 공간이 달라졌다면 그 값이 갱신된다.
 pub fn upsert_drive(conn: &Connection, vol: &Volume) -> Result<i64> {
     let ts = now();
     conn.execute(
         r#"
-        INSERT INTO drives (volume_serial, label, total_bytes, free_bytes, first_seen, last_seen)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+        INSERT INTO drives (volume_serial, label, filesystem, total_bytes, free_bytes, first_seen, last_seen)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
         ON CONFLICT(volume_serial) DO UPDATE SET
             label       = excluded.label,
+            filesystem  = excluded.filesystem,
             total_bytes = excluded.total_bytes,
             free_bytes  = excluded.free_bytes,
             last_seen   = excluded.last_seen
         "#,
-        params![vol.serial, vol.label, vol.total_bytes as i64, vol.free_bytes as i64, ts],
+        params![
+            vol.serial,
+            vol.label,
+            vol.filesystem,
+            vol.total_bytes as i64,
+            vol.free_bytes as i64,
+            ts
+        ],
     )
     .context("하드 정보를 저장할 수 없습니다")?;
 
@@ -334,6 +372,8 @@ pub fn search(
 pub struct DriveRow {
     pub label: String,
     pub serial: String,
+    /// 이 하드를 어떤 형식으로 포맷해 두었는지 (`NTFS`, `exFAT`, `FAT32` 등).
+    pub filesystem: String,
     pub total_bytes: u64,
     pub free_bytes: u64,
     pub entry_count: i64,
@@ -352,7 +392,7 @@ pub fn list_drives(conn: &Connection) -> Result<Vec<DriveRow>> {
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT d.label, d.volume_serial, d.total_bytes, d.free_bytes,
+        SELECT d.label, d.volume_serial, d.filesystem, d.total_bytes, d.free_bytes,
                (SELECT COUNT(*) FROM entries e WHERE e.drive_id = d.id),
                d.first_seen, d.last_seen, d.last_scan_at
         FROM drives d
@@ -363,12 +403,13 @@ pub fn list_drives(conn: &Connection) -> Result<Vec<DriveRow>> {
         Ok(DriveRow {
             label: r.get(0)?,
             serial: r.get(1)?,
-            total_bytes: r.get::<_, i64>(2)? as u64,
-            free_bytes: r.get::<_, i64>(3)? as u64,
-            entry_count: r.get(4)?,
-            first_seen: r.get(5)?,
-            last_seen: r.get(6)?,
-            last_scan_at: r.get(7)?,
+            filesystem: r.get(2)?,
+            total_bytes: r.get::<_, i64>(3)? as u64,
+            free_bytes: r.get::<_, i64>(4)? as u64,
+            entry_count: r.get(5)?,
+            first_seen: r.get(6)?,
+            last_seen: r.get(7)?,
+            last_scan_at: r.get(8)?,
             connected: false,
             letter: None,
         })
@@ -661,16 +702,21 @@ mod tests {
         assert_eq!(forget(&conn, "없는하드").unwrap(), None);
     }
 
+    fn test_volume(serial: &str, label: &str, filesystem: &str) -> Volume {
+        Volume {
+            letter: 'E',
+            serial: serial.into(),
+            label: label.into(),
+            filesystem: filesystem.into(),
+            total_bytes: 1000,
+            free_bytes: 500,
+        }
+    }
+
     #[test]
     fn 같은_시리얼은_같은_하드로_본다() {
         let conn = test_db();
-        let vol = Volume {
-            letter: 'E',
-            serial: "AAAA0001".into(),
-            label: "PROJECT-A".into(),
-            total_bytes: 1000,
-            free_bytes: 500,
-        };
+        let vol = test_volume("AAAA0001", "PROJECT-A", "NTFS");
         let first = upsert_drive(&conn, &vol).unwrap();
 
         // 라벨을 바꿔 달고 드라이브 문자가 달라져도 같은 행을 갱신해야 한다.
@@ -685,5 +731,95 @@ mod tests {
             .query_row("SELECT label FROM drives WHERE id = ?1", params![first], |r| r.get(0))
             .unwrap();
         assert_eq!(label, "PROJECT-A2");
+    }
+
+    #[test]
+    fn 파일_시스템을_기록한다() {
+        let conn = test_db();
+        for (serial, label, fs) in [
+            ("AAAA0001", "NTFS하드", "NTFS"),
+            ("BBBB0002", "맥하드", "exFAT"),
+            ("CCCC0003", "옛날하드", "FAT32"),
+            ("DDDD0004", "애플하드", "HFS+"),
+        ] {
+            upsert_drive(&conn, &test_volume(serial, label, fs)).unwrap();
+        }
+
+        let rows = list_drives(&conn).unwrap();
+        let mut pairs: Vec<(&str, &str)> =
+            rows.iter().map(|d| (d.label.as_str(), d.filesystem.as_str())).collect();
+        pairs.sort_unstable();
+
+        assert_eq!(
+            pairs,
+            vec![
+                ("NTFS하드", "NTFS"),
+                ("맥하드", "exFAT"),
+                ("애플하드", "HFS+"),
+                ("옛날하드", "FAT32"),
+            ]
+        );
+    }
+
+    #[test]
+    fn 다시_포맷하면_바뀐_형식이_반영된다() {
+        let conn = test_db();
+        upsert_drive(&conn, &test_volume("AAAA0001", "하드", "exFAT")).unwrap();
+        upsert_drive(&conn, &test_volume("AAAA0001", "하드", "NTFS")).unwrap();
+
+        let rows = list_drives(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].filesystem, "NTFS");
+    }
+
+    /// 파일 시스템 열이 없던 시절의 인덱스를 열어도
+    /// 인덱싱해 둔 내용이 날아가면 안 된다.
+    #[test]
+    fn 예전_인덱스를_열면_열만_추가하고_내용은_지킨다() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // filesystem 열이 없는 예전 스키마를 그대로 만든다.
+        conn.execute_batch(
+            r#"
+            CREATE TABLE drives (
+                id INTEGER PRIMARY KEY, volume_serial TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
+                total_bytes INTEGER NOT NULL DEFAULT 0, free_bytes INTEGER NOT NULL DEFAULT 0,
+                first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_scan_at TEXT
+            );
+            CREATE TABLE entries (
+                id INTEGER PRIMARY KEY,
+                drive_id INTEGER NOT NULL REFERENCES drives(id) ON DELETE CASCADE,
+                path TEXT NOT NULL, name TEXT NOT NULL, is_dir INTEGER NOT NULL,
+                size INTEGER NOT NULL DEFAULT 0, mtime INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(drive_id, path)
+            );
+            INSERT INTO drives (volume_serial, label, first_seen, last_seen)
+                VALUES ('OLD00001', '예전하드', 'x', 'x');
+            INSERT INTO entries (drive_id, path, name, is_dir) VALUES (1, '자료.psd', '자료.psd', 0);
+            "#,
+        )
+        .unwrap();
+
+        assert!(!has_column(&conn, "drives", "filesystem").unwrap());
+        init_schema(&conn).unwrap();
+        assert!(has_column(&conn, "drives", "filesystem").unwrap());
+
+        let rows = list_drives(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "예전하드");
+        assert_eq!(rows[0].entry_count, 1, "인덱싱해 둔 항목이 사라지면 안 된다");
+        assert_eq!(rows[0].filesystem, "(알 수 없음)");
+
+        // 다시 연결하면 실제 형식으로 채워진다.
+        upsert_drive(&conn, &test_volume("OLD00001", "예전하드", "NTFS")).unwrap();
+        assert_eq!(list_drives(&conn).unwrap()[0].filesystem, "NTFS");
+    }
+
+    #[test]
+    fn 마이그레이션은_여러_번_실행해도_안전하다() {
+        let conn = test_db();
+        init_schema(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        assert!(has_column(&conn, "drives", "filesystem").unwrap());
     }
 }

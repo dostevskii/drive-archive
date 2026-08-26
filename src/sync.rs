@@ -156,7 +156,7 @@ pub enum SyncOutcome {
 pub fn sync_all(force: bool) -> Result<Vec<SyncOutcome>> {
     let volumes = volume::list_external_volumes();
     if volumes.is_empty() {
-        log("연결된 외장 NTFS 하드가 없습니다");
+        log("연결된 외장하드가 없습니다");
         return Ok(Vec::new());
     }
 

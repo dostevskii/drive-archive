@@ -131,7 +131,7 @@ fn cmd_sync(force: bool) -> Result<()> {
 
     let outcomes = sync::sync_all(force)?;
     if outcomes.is_empty() {
-        println!("연결된 외장 NTFS 하드가 없습니다.");
+        println!("연결된 외장하드가 없습니다.");
         return Ok(());
     }
 
@@ -173,7 +173,7 @@ fn cmd_scan(drive: Option<String>) -> Result<()> {
     };
 
     if volumes.is_empty() {
-        println!("연결된 외장 NTFS 하드가 없습니다.");
+        println!("연결된 외장하드가 없습니다.");
         return Ok(());
     }
 
@@ -259,8 +259,9 @@ fn cmd_drives(json: bool) -> Result<()> {
         };
         println!("{}  [{}]", d.label, state);
         println!(
-            "  항목 {}개 · 용량 {} 중 {} 남음",
+            "  항목 {}개 · {} · 용량 {} 중 {} 남음",
             d.entry_count,
+            d.filesystem,
             format_bytes(d.total_bytes),
             format_bytes(d.free_bytes)
         );
