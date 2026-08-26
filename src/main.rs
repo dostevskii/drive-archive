@@ -1,3 +1,358 @@
+//! drive-archive — 외장하드에 흩어진 자료를 인덱싱하고 검색하는 도구.
+//!
+//! 하드가 연결될 때만 잠깐 실행되고 끝나면 완전히 종료된다.
+//! 상주 프로세스가 없으므로 평소 리소스 사용량은 0이다.
+
+mod db;
+mod elevation;
+mod scan;
+mod sync;
+mod task;
+mod volume;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "drive-archive",
+    version,
+    about = "외장하드 자료를 인덱싱하고, 하드를 연결하지 않아도 검색할 수 있게 해줍니다",
+    long_about = None
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// 연결된 외장하드를 확인해 인덱스를 갱신합니다 (작업 스케줄러가 자동 호출)
+    Sync {
+        /// 방금 스캔한 하드도 다시 훑습니다
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// 하드 하나를 수동으로 전체 재스캔합니다
+    Scan {
+        /// 드라이브 문자 (예: E). 생략하면 연결된 하드를 모두 스캔합니다
+        drive: Option<String>,
+    },
+
+    /// 파일과 폴더를 이름으로 검색해, 어느 하드에 있는지 보여줍니다
+    Search {
+        /// 찾을 이름의 일부
+        keyword: String,
+        /// 특정 하드 안에서만 검색 (라벨 또는 볼륨 시리얼)
+        #[arg(long)]
+        drive: Option<String>,
+        /// 폴더만 검색 (프로젝트 단위로 찾을 때)
+        #[arg(long)]
+        dirs_only: bool,
+        /// 결과 개수 제한
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// JSON으로 출력
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 인덱스에 등록된 하드 목록과 현재 연결 여부를 보여줍니다
+    Drives {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 인덱스 통계를 보여줍니다
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 더 이상 쓰지 않는 하드를 인덱스에서 제거합니다
+    Forget {
+        /// 하드 라벨 또는 볼륨 시리얼
+        name: String,
+    },
+
+    /// 외장하드 연결 시 자동 인덱싱하도록 작업 스케줄러에 등록합니다
+    SetupTask,
+
+    /// 작업 스케줄러 등록을 해제합니다
+    RemoveTask,
+}
+
 fn main() {
-    println!("Hello, world!");
+    if let Err(e) = run() {
+        eprintln!("오류: {e:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    match Cli::parse().command {
+        Cmd::Sync { force } => cmd_sync(force),
+        Cmd::Scan { drive } => cmd_scan(drive),
+        Cmd::Search { keyword, drive, dirs_only, limit, json } => {
+            cmd_search(&keyword, drive.as_deref(), dirs_only, limit, json)
+        }
+        Cmd::Drives { json } => cmd_drives(json),
+        Cmd::Status { json } => cmd_status(json),
+        Cmd::Forget { name } => cmd_forget(&name),
+        Cmd::SetupTask => cmd_setup_task(),
+        Cmd::RemoveTask => cmd_remove_task(),
+    }
+}
+
+// ---------------------------------------------------------------- 명령 구현
+
+fn cmd_sync(force: bool) -> Result<()> {
+    let Some(_lock) = sync::InstanceLock::acquire()? else {
+        // 이미 다른 인스턴스가 스캔 중이다. 조용히 물러난다.
+        sync::log("이미 실행 중이므로 종료합니다");
+        return Ok(());
+    };
+    sync::lower_priority();
+
+    let outcomes = sync::sync_all(force)?;
+    if outcomes.is_empty() {
+        println!("연결된 외장 NTFS 하드가 없습니다.");
+        return Ok(());
+    }
+
+    for o in &outcomes {
+        if o.skipped {
+            println!("{} ({}:)  방금 스캔했으므로 건너뜀", o.label, o.letter);
+        } else if o.stats.has_changes() {
+            println!(
+                "{} ({}:)  추가 {} / 변경 {} / 삭제 {}",
+                o.label, o.letter, o.stats.added, o.stats.updated, o.stats.removed
+            );
+        } else {
+            println!("{} ({}:)  변경 없음 ({}개 항목)", o.label, o.letter, o.stats.unchanged);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_scan(drive: Option<String>) -> Result<()> {
+    sync::lower_priority();
+
+    let volumes = match drive {
+        Some(d) => {
+            let letter = d
+                .chars()
+                .next()
+                .filter(|c| c.is_ascii_alphabetic())
+                .context("드라이브 문자를 알파벳 한 글자로 지정하세요 (예: E)")?;
+            vec![volume::volume_at(letter)?]
+        }
+        None => volume::list_external_volumes(),
+    };
+
+    if volumes.is_empty() {
+        println!("연결된 외장 NTFS 하드가 없습니다.");
+        return Ok(());
+    }
+
+    let mut conn = db::open()?;
+    for vol in &volumes {
+        println!("{} ({}:) 스캔 중...", vol.label, vol.letter);
+        let stats = sync::sync_volume(&mut conn, vol)?;
+        println!(
+            "  추가 {} / 변경 {} / 삭제 {} / 그대로 {}",
+            stats.added, stats.updated, stats.removed, stats.unchanged
+        );
+    }
+    Ok(())
+}
+
+fn cmd_search(
+    keyword: &str,
+    drive: Option<&str>,
+    dirs_only: bool,
+    limit: usize,
+    json: bool,
+) -> Result<()> {
+    let conn = db::open()?;
+    let hits = db::search(&conn, keyword, drive, dirs_only, limit)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&hits)?);
+        return Ok(());
+    }
+
+    if hits.is_empty() {
+        println!("'{keyword}'에 해당하는 자료를 찾지 못했습니다.");
+        let stats = db::stats(&conn)?;
+        if stats.entry_count == 0 {
+            println!(
+                "\n아직 인덱싱된 하드가 없습니다. 외장하드를 연결한 뒤 `drive-archive sync`를 실행하세요."
+            );
+        }
+        return Ok(());
+    }
+
+    let label_width = hits.iter().map(|h| display_width(&h.drive_label)).max().unwrap_or(0);
+    for h in &hits {
+        let kind = if h.is_dir { "폴더".to_string() } else { format_bytes(h.size) };
+        let date = h.modified.as_deref().unwrap_or("-");
+        let pad = " ".repeat(label_width.saturating_sub(display_width(&h.drive_label)));
+        let trailing = if h.is_dir { "\\" } else { "" };
+        println!("  [{}]{pad}  {}{trailing}   ({kind}, {date})", h.drive_label, h.path);
+    }
+
+    // 어느 하드를 꺼내야 하는지가 이 프로그램의 존재 이유다. 마지막에 다시 짚어 준다.
+    let mut labels: Vec<&str> = hits.iter().map(|h| h.drive_label.as_str()).collect();
+    labels.sort_unstable();
+    labels.dedup();
+    println!("\n→ {} 하드를 연결하세요.", labels.join(", "));
+
+    if hits.len() == limit {
+        println!("  (결과가 {limit}개에서 잘렸습니다. --limit 으로 늘릴 수 있습니다.)");
+    }
+    Ok(())
+}
+
+fn cmd_drives(json: bool) -> Result<()> {
+    let conn = db::open()?;
+    let drives = db::list_drives(&conn)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&drives)?);
+        return Ok(());
+    }
+
+    if drives.is_empty() {
+        println!(
+            "아직 인덱싱된 하드가 없습니다. 외장하드를 연결한 뒤 `drive-archive sync`를 실행하세요."
+        );
+        return Ok(());
+    }
+
+    for d in &drives {
+        let state = match d.letter {
+            Some(l) => format!("연결됨 ({l}:)"),
+            None => "연결 안 됨".to_string(),
+        };
+        println!("{}  [{}]", d.label, state);
+        println!(
+            "  항목 {}개 · 용량 {} 중 {} 남음",
+            d.entry_count,
+            format_bytes(d.total_bytes),
+            format_bytes(d.free_bytes)
+        );
+        println!(
+            "  마지막 연결 {} · 마지막 스캔 {}",
+            d.last_seen,
+            d.last_scan_at.as_deref().unwrap_or("없음")
+        );
+        println!("  볼륨 시리얼 {}", d.serial);
+        println!();
+    }
+    Ok(())
+}
+
+fn cmd_status(json: bool) -> Result<()> {
+    let conn = db::open()?;
+    let s = db::stats(&conn)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&s)?);
+        return Ok(());
+    }
+
+    println!("등록된 하드   {}개", s.drive_count);
+    println!("인덱싱된 항목 {}개 (파일 {} · 폴더 {})", s.entry_count, s.file_count, s.dir_count);
+    println!("인덱스 크기   {}", format_bytes(s.db_bytes));
+    println!("인덱스 위치   {}", s.db_path);
+    println!(
+        "자동 인덱싱   {}",
+        if task::exists() { "켜짐" } else { "꺼짐 (`drive-archive setup-task`로 켤 수 있습니다)" }
+    );
+    Ok(())
+}
+
+fn cmd_forget(name: &str) -> Result<()> {
+    let conn = db::open()?;
+    match db::forget(&conn, name)? {
+        Some((label, removed)) => {
+            println!("'{label}' 하드를 인덱스에서 제거했습니다 (항목 {removed}개).");
+        }
+        None => {
+            println!("'{name}'에 해당하는 하드가 인덱스에 없습니다.");
+            println!("`drive-archive drives`로 등록된 하드를 확인하세요.");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_setup_task() -> Result<()> {
+    let exe = task::current_exe()?;
+    task::setup(&exe)?;
+    println!("자동 인덱싱을 켰습니다.");
+    println!("  실행 파일: {}", exe.display());
+    println!("  이제 외장하드를 연결하면 인덱스가 자동으로 갱신됩니다.");
+    println!("\n주의: 실행 파일을 다른 폴더로 옮기면 `setup-task`를 다시 실행해야 합니다.");
+    Ok(())
+}
+
+fn cmd_remove_task() -> Result<()> {
+    if task::remove()? {
+        println!("자동 인덱싱을 껐습니다. 인덱스 자체는 그대로 남아 있습니다.");
+    } else {
+        println!("자동 인덱싱이 등록되어 있지 않습니다.");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- 출력 보조
+
+/// 바이트 수를 사람이 읽는 단위로 바꾼다.
+fn format_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// 터미널에서 차지하는 칸 수. 한글은 두 칸을 쓴다.
+fn display_width(s: &str) -> usize {
+    s.chars().map(|c| if (c as u32) > 0x1100 { 2 } else { 1 }).sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 바이트는_단위와_함께_표시된다() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    #[test]
+    fn 한글은_두_칸으로_계산한다() {
+        assert_eq!(display_width("ABC"), 3);
+        assert_eq!(display_width("가나"), 4);
+        assert_eq!(display_width("A가"), 3);
+    }
+
+    #[test]
+    fn cli_인자가_파싱된다() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
 }
