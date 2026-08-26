@@ -252,6 +252,12 @@ Rust 1.85 이상과 MSVC 빌드 도구가 필요합니다.
 
 ---
 
+## 개발 현황
+
+지금 무엇이 동작하고 무엇이 남아 있는지, 버전별 변경 내역과 설계 판단의 근거는 [STATUS.md](STATUS.md)에 있습니다.
+
+---
+
 ## 라이선스
 
 이 프로그램은 [GNU General Public License v3.0](LICENSE)에 따라 배포됩니다.
