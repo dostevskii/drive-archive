@@ -127,6 +127,26 @@ pub fn setup(exe: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 등록된 작업을 지금 한 번 실행한다.
+///
+/// 마운트 이벤트는 하드를 꽂는 순간에만 발생한다. 등록하는 시점에 이미 꽂혀 있던
+/// 하드는 그 이벤트를 놓친 뒤이므로, 등록 직후 작업을 한 번 깨워 지금 연결된 하드를
+/// 인덱싱하게 한다. 사용자가 하드를 뽑았다 다시 꽂지 않아도 되게 하는 것이 목적이다.
+///
+/// 작업은 `LeastPrivilege`로 등록되어 있어, 상승된 권한에서 호출해도 스캔 자체는
+/// 일반 사용자 권한으로 돈다. 실행에는 관리자 권한이 필요 없다.
+pub fn run_now() -> Result<()> {
+    let out = Command::new("schtasks")
+        .args(["/Run", "/TN", TASK_NAME])
+        .output()
+        .context("schtasks를 실행할 수 없습니다")?;
+
+    if !out.status.success() {
+        bail!("작업을 시작하지 못했습니다:\n{}", decode_console(&out.stderr, &out.stdout));
+    }
+    Ok(())
+}
+
 /// 등록된 작업을 제거한다. 없으면 조용히 넘어간다.
 pub fn remove() -> Result<bool> {
     if !exists() {

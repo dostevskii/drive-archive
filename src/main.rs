@@ -189,6 +189,30 @@ fn cmd_scan(drive: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// 검색 결과에 나온 하드를 "꺼내 와야 하는 것"과 "지금 연결된 것"으로 나눈다.
+///
+/// 라벨은 겹칠 수 있으므로(하드를 포맷하면 같은 이름의 새 볼륨이 생긴다) 볼륨 시리얼로 판별한다.
+/// 반환값은 (연결 필요, 이미 연결됨) 순이고, 연결된 쪽에는 지금 붙어 있는 드라이브 문자를 덧붙인다.
+fn split_by_connection(
+    hits: &[db::SearchHit],
+    live: &[volume::Volume],
+) -> (Vec<String>, Vec<String>) {
+    let mut drives: Vec<(&str, &str)> =
+        hits.iter().map(|h| (h.drive_label.as_str(), h.drive_serial.as_str())).collect();
+    drives.sort_unstable();
+    drives.dedup();
+
+    let mut needed = Vec::new();
+    let mut ready = Vec::new();
+    for (label, serial) in drives {
+        match live.iter().find(|v| v.serial == serial) {
+            Some(v) => ready.push(format!("{label} ({}:)", v.letter)),
+            None => needed.push(label.to_string()),
+        }
+    }
+    (needed, ready)
+}
+
 fn cmd_search(
     keyword: &str,
     drive: Option<&str>,
@@ -225,10 +249,15 @@ fn cmd_search(
     }
 
     // 어느 하드를 꺼내야 하는지가 이 프로그램의 존재 이유다. 마지막에 다시 짚어 준다.
-    let mut labels: Vec<&str> = hits.iter().map(|h| h.drive_label.as_str()).collect();
-    labels.sort_unstable();
-    labels.dedup();
-    println!("\n→ {} 하드를 연결하세요.", labels.join(", "));
+    // 이미 꽂혀 있는 하드까지 "연결하세요"라고 하면 서랍을 헛되이 뒤지게 만든다.
+    let (needed, ready) = split_by_connection(&hits, &volume::list_external_volumes());
+    println!();
+    if !needed.is_empty() {
+        println!("→ {} 하드를 연결하세요.", needed.join(", "));
+    }
+    if !ready.is_empty() {
+        println!("→ 지금 연결되어 있는 하드: {}", ready.join(", "));
+    }
 
     if hits.len() == limit {
         println!("  (결과가 {limit}개에서 잘렸습니다. --limit 으로 늘릴 수 있습니다.)");
@@ -316,6 +345,13 @@ fn cmd_setup_task() -> Result<()> {
     println!("자동 인덱싱을 켰습니다.");
     println!("  실행 파일: {}", exe.display());
     println!("  이제 외장하드를 연결하면 인덱스가 자동으로 갱신됩니다.");
+
+    // 지금 꽂혀 있는 하드는 마운트 이벤트가 이미 지나갔으므로 한 번 깨워 준다.
+    match task::run_now() {
+        Ok(()) => println!("  지금 연결되어 있는 하드도 백그라운드에서 인덱싱을 시작했습니다."),
+        Err(e) => eprintln!("  다만 지금 연결된 하드의 인덱싱을 시작하지 못했습니다: {e:#}"),
+    }
+
     println!("\n주의: 실행 파일을 다른 폴더로 옮기면 `setup-task`를 다시 실행해야 합니다.");
     Ok(())
 }
@@ -376,5 +412,77 @@ mod tests {
     fn cli_인자가_파싱된다() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    fn hit(label: &str, serial: &str) -> db::SearchHit {
+        db::SearchHit {
+            drive_label: label.into(),
+            drive_serial: serial.into(),
+            path: "어딘가\\파일.psd".into(),
+            name: "파일.psd".into(),
+            is_dir: false,
+            size: 0,
+            modified: None,
+        }
+    }
+
+    fn vol(letter: char, serial: &str, label: &str) -> volume::Volume {
+        volume::Volume {
+            letter,
+            serial: serial.into(),
+            label: label.into(),
+            filesystem: "NTFS".into(),
+            total_bytes: 0,
+            free_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn 연결된_하드는_연결하라고_하지_않는다() {
+        let hits = [hit("Works D", "90FA8BC5")];
+        let live = [vol('L', "90FA8BC5", "Works D")];
+
+        let (needed, ready) = split_by_connection(&hits, &live);
+
+        assert!(needed.is_empty());
+        assert_eq!(ready, ["Works D (L:)"]);
+    }
+
+    #[test]
+    fn 연결되지_않은_하드는_꺼내오라고_한다() {
+        let hits = [hit("Works E", "0480390F")];
+
+        let (needed, ready) = split_by_connection(&hits, &[]);
+
+        assert_eq!(needed, ["Works E"]);
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn 라벨이_같아도_시리얼이_다르면_다른_하드로_본다() {
+        // 하드를 포맷하면 라벨은 그대로여도 볼륨 시리얼이 바뀐다.
+        // 인덱스에 남은 옛 항목을 새 볼륨과 같은 하드로 착각하면 안 된다.
+        let hits = [hit("Works F", "6C965A22")];
+        let live = [vol('I', "C482BDB6", "Works F")];
+
+        let (needed, ready) = split_by_connection(&hits, &live);
+
+        assert_eq!(needed, ["Works F"]);
+        assert!(ready.is_empty());
+    }
+
+    #[test]
+    fn 같은_하드가_여러_번_나와도_한_번만_알린다() {
+        let hits = [
+            hit("Works E", "0480390F"),
+            hit("Works E", "0480390F"),
+            hit("Works D", "90FA8BC5"),
+        ];
+        let live = [vol('L', "90FA8BC5", "Works D")];
+
+        let (needed, ready) = split_by_connection(&hits, &live);
+
+        assert_eq!(needed, ["Works E"]);
+        assert_eq!(ready, ["Works D (L:)"]);
     }
 }

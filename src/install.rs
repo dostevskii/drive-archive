@@ -131,6 +131,19 @@ pub fn install() -> Result<()> {
     println!("[1/2] 자동 인덱싱을 등록했습니다.");
     println!("      이제 외장하드를 연결하면 인덱스가 자동으로 갱신됩니다.");
 
+    // 지금 꽂혀 있는 하드는 마운트 이벤트가 이미 지나갔다. 등록만 하고 끝내면
+    // 다음 연결이나 로그온까지 인덱싱되지 않으므로, 여기서 한 번 깨워 준다.
+    match task::run_now() {
+        Ok(()) => {
+            println!("      지금 연결되어 있는 하드도 백그라운드에서 인덱싱을 시작했습니다.");
+            println!("      진행 상황은 `drive-archive status`로 확인할 수 있습니다.");
+        }
+        Err(e) => {
+            eprintln!("      다만 지금 연결된 하드의 인덱싱을 시작하지 못했습니다: {e:#}");
+            eprintln!("      `drive-archive sync`를 직접 실행하세요. 자동 인덱싱 등록은 끝났습니다.");
+        }
+    }
+
     let mut registered = Vec::new();
     for (name, path) in claude_config_targets() {
         match register_mcp(&path, &exe) {
