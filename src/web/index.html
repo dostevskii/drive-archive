@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DRIVE-ARCHIVE</title>
+<style>
+  /* 폰트는 실행 파일에 들어 있고 서버가 /font.woff2로 내려준다. */
+  @font-face {
+    font-family: 'FiraD2';
+    src: url('/font.woff2') format('woff2');
+    font-weight: 400;
+    font-style: normal;
+    font-display: block;
+  }
+
+  :root {
+    --blue: #000fc0;   /* 바탕 */
+    --fg:   #ffffff;   /* 글자 */
+    --bar:  #dee0de;   /* 반전 막대 (타이틀·검색·선택 행) */
+    --line: 21px;      /* 한 줄 높이 */
+    --cols: 41;        /* 화면의 가로 칸 수. 시안이 41칸이다. */
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--blue);
+    color: var(--fg);
+    font: 18px/var(--line) 'FiraD2', 'D2Coding', 'Consolas', monospace;
+    /* 시안의 좌 여백 81px. 화면이 좁으면 줄인다. */
+    padding: 42px 24px 42px min(81px, 6vw);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* 화면 전체가 41칸 폭을 넘지 않는다. TUI 한 컬럼처럼 보이게 하는 핵심이다. */
+  .col { width: calc(var(--cols) * 1ch); max-width: 100%; }
+
+  /* 반전 막대 — 밝은 바탕에 파란 글씨.
+     `flex: none`이 없으면 목록이 길어질 때 body(flex 컨테이너)가 이 막대를
+     세로로 눌러 버린다. 막대만 얇아지고 글자가 파란 바탕으로 삐져나온다. */
+  .bar {
+    background: var(--bar);
+    color: var(--blue);
+    height: var(--line);
+    flex: none;
+    white-space: pre;
+    overflow: hidden;
+  }
+
+  .spacer { height: var(--line); flex: none; }
+
+  pre.deco {
+    margin: 0;
+    font: inherit;
+    flex: none;
+    white-space: pre;
+  }
+
+  /* ── 검색 줄 ───────────────────────────────────────── */
+  #searchbar { position: relative; cursor: text; }
+
+  /* 실제 입력은 보이지 않는 input이 받는다. IME(한글) 조합을 브라우저에
+     맡기기 위해서다. 화면에 보이는 글자와 커서는 아래에서 직접 그린다. */
+  #keeper {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    color: transparent;
+    caret-color: transparent;
+    font: inherit;
+    outline: none;
+  }
+
+  #shown { position: relative; pointer-events: none; }
+
+  #cursor {
+    position: absolute;
+    top: 0;
+    width: 1ch;
+    height: var(--line);
+    background: var(--blue);
+  }
+  /* 깜빡임은 입력 중일 때만. step-end라 부드럽게 사라지지 않고 툭툭 끊긴다. */
+  #cursor.blink { animation: blink 1.06s step-end infinite; }
+  #cursor.hidden { display: none; }
+  @keyframes blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+
+  /* ── 표 ────────────────────────────────────────────── */
+  #rule, #head { white-space: pre; flex: none; }
+
+  /* 높이는 JS(fitList)가 줄 높이의 정수배로 고정한다. 그래야 마지막 줄이
+     반만 보이는 일이 없다. 남는 몇 픽셀은 그냥 바탕으로 둔다. */
+  #list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+  #list::-webkit-scrollbar { width: 0; }
+
+  .row {
+    display: grid;
+    height: var(--line);
+    white-space: pre;
+    cursor: pointer;
+  }
+  .row > span { overflow: hidden; }
+  .row.drive  { grid-template-columns: 12ch 13ch 9ch 7ch; }
+  /* 하드 이름 칸의 폭은 실제 이름 길이에 맞춰 정한다(paintHead 참고).
+     그래야 이름 끝이 표의 오른쪽 끝에 맞고, 헤더 HDD가 그 첫 글자와 나란해진다. */
+  .row.hit    { grid-template-columns: var(--name-w) var(--hdd-w); }
+  .row.browse { grid-template-columns: calc(var(--cols) * 1ch - 9ch) 9ch; }
+  .num  { text-align: right; }
+  .sel  { background: var(--bar); color: var(--blue); }
+  /* 연결되지 않은 하드는 한 단계 죽여서 표시한다. 지금 열 수 없다는 뜻이다. */
+  .off  { opacity: 0.55; }
+  .sel.off { opacity: 1; }
+
+  .note { white-space: pre; opacity: 0.75; }
+
+  /* 아래에 더 있다는 표시. 자리는 늘 차지하고 보이기만 껐다 켠다.
+     숨길 때 없애 버리면 목록 높이가 바뀌어 화면이 출렁인다.
+     반전은 줄 전체가 아니라 글자에만 준다. */
+  #more { height: var(--line); flex: none; white-space: pre; text-align: center; }
+  #more span { background: var(--bar); color: var(--blue); }
+  #more.off { visibility: hidden; }
+
+  /* ── 하단 상태 ─────────────────────────────────────── */
+  #status { flex: none; margin-top: var(--line); }
+  /* 경로는 41칸을 넘겨도 좋다. 이 줄이 화면의 결론이라 잘리면 쓸모가 없다. */
+  #where  { white-space: pre; overflow: hidden; text-overflow: ellipsis; height: var(--line); }
+  #vim    { white-space: pre; cursor: pointer; display: inline-block; }
+  #mode   { white-space: pre; }
+</style>
+</head>
+<body>
+
+  <div class="bar col" id="title">DRIVE-ARCHIVE</div>
+  <div class="spacer"></div>
+
+  <pre class="deco col">ABCDEFGHIJKLMNOPQRSTU
+VWXYZ0123456789&amp;-:.+=
+()[]&lt;&gt;/\,--:--<span id="clock">--:--__</span></pre>
+  <div class="spacer"></div>
+
+  <!-- 이 줄은 `white-space: pre`라 태그 사이의 줄바꿈·들여쓰기가 그대로 글자로 찍힌다.
+       한 줄로 붙여 쓴 것은 그래서다. 줄을 나누지 말 것. -->
+  <div class="bar col" id="searchbar"><span id="shown">SEARCH:</span><span id="cursor"></span><input id="keeper" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></div>
+  <div class="spacer"></div>
+
+  <div class="col" id="rule"></div>
+  <div class="col" id="head"></div>
+  <div class="spacer"></div>
+
+  <div class="col" id="list"></div>
+  <div class="col off" id="more"><span>-- MORE --</span></div>
+
+  <div id="status">
+    <div id="where"></div>
+    <div id="vim">VIM MODE  [OFF]</div>
+    <div id="mode">--INSERT--</div>
+  </div>
+
+<script>
+"use strict";
+
+const COLS = 41;
+const LINE = 21;                       // CSS의 --line 과 같아야 한다
+const SIZE_W = 9;                      // 탐색 화면의 크기 칸
+
+/** 위로 올라가는 줄. 파일 브라우저의 `..` 그대로다. */
+const UP_ROW = { name: '..', is_dir: true, up: true };
+
+const SEP = '\\';                      // 인덱스에 저장된 경로 구분자
+
+const el = {
+  clock:  document.getElementById('clock'),
+  bar:    document.getElementById('searchbar'),
+  shown:  document.getElementById('shown'),
+  cursor: document.getElementById('cursor'),
+  keeper: document.getElementById('keeper'),
+  rule:   document.getElementById('rule'),
+  head:   document.getElementById('head'),
+  list:   document.getElementById('list'),
+  where:  document.getElementById('where'),
+  more:   document.getElementById('more'),
+  vim:    document.getElementById('vim'),
+  mode:   document.getElementById('mode'),
+};
+
+const state = {
+  origin: null,    // 검색 결과에서 폴더로 들어온 자리 { serial, dir, sel }
+  hitsTruncated: false, // 검색 결과가 상한에 걸렸는지 (탐색 중에도 잃지 않게 따로 둔다)
+  drives: [],      // 검색 전 기본 화면에 뿌리는 하드 목록
+  hits:   [],      // 검색 결과
+  items:  [],      // 폴더를 펼쳐 본 내용
+  browse: null,    // 지금 보고 있는 위치 { serial, label, dir }
+  rows:   [],      // 지금 화면에 뿌려진 행 (drives · hits · items)
+  kind:   'drive', // 'drive' | 'hit' | 'browse'
+  sel:    0,
+  vim:    false,   // VIM 모드 켬/끔
+  insert: true,    // 입력 중인가 (VIM이 꺼져 있으면 항상 참)
+  note:   '',      // 표 대신 띄울 안내 문구
+  truncated: false, // 결과가 상한에 걸려 잘렸는가
+};
+
+/* ── 글자 폭 ────────────────────────────────────────────
+   고정폭 폰트에서도 한글은 영문의 두 칸을 차지한다. 커서를 글자 위에
+   정확히 얹으려면 칸 수로 세야 한다.                                */
+
+function isWide(cp) {
+  return (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0x303e) ||
+         (cp >= 0x3041 && cp <= 0x33ff) || (cp >= 0x3400 && cp <= 0x4dbf) ||
+         (cp >= 0x4e00 && cp <= 0x9fff) || (cp >= 0xa000 && cp <= 0xa4cf) ||
+         (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) ||
+         (cp >= 0xfe30 && cp <= 0xfe6f) || (cp >= 0xff00 && cp <= 0xff60) ||
+         (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x20000 && cp <= 0x3fffd);
+}
+
+function width(s) {
+  let w = 0;
+  for (const ch of s) w += isWide(ch.codePointAt(0)) ? 2 : 1;
+  return w;
+}
+
+/** 표시 폭이 max 칸을 넘으면 잘라내고 끝에 `~`를 붙인다. */
+function fit(s, max) {
+  if (width(s) <= max) return s;
+  let out = '', w = 0;
+  for (const ch of s) {
+    const cw = isWide(ch.codePointAt(0)) ? 2 : 1;
+    if (w + cw > max - 1) break;
+    out += ch; w += cw;
+  }
+  return out + '~';
+}
+
+/** 텍스트를 가운데 두고 좌우를 `-`로 채워 COLS 칸을 만든다. */
+function rule(label) {
+  const inner = ' ' + label + ' ';
+  const pad = COLS - width(inner);
+  if (pad <= 0) return fit(label, COLS);
+  const left = Math.ceil(pad / 2);
+  return '-'.repeat(left) + inner + '-'.repeat(pad - left);
+}
+
+const comma = n => n.toLocaleString('en-US');
+
+/** 바이트를 사람이 읽는 크기로. 칸이 좁으므로 짧게 적는다. */
+function humanSize(b) {
+  if (b < 1024) return b + ' B';
+  const unit = ['KB', 'MB', 'GB', 'TB'];
+  let v = b / 1024, i = 0;
+  while (v >= 1024 && i < unit.length - 1) { v /= 1024; i++; }
+  return (v < 10 ? v.toFixed(1) : Math.round(v)) + ' ' + unit[i];
+}
+
+/** 목록 높이를 줄 높이의 정수배로 고정한다. 마지막 줄이 반만 보이지 않게. */
+function fitList() {
+  el.list.style.flex = '1 1 auto';
+  el.list.style.height = '';
+  const rows = Math.max(1, Math.floor(el.list.clientHeight / LINE));
+  el.list.style.flex = 'none';
+  el.list.style.height = `${rows * LINE}px`;
+}
+
+/* ── 시계 ──────────────────────────────────────────────
+   시안의 `08:49PM` 자리다. 이 자리만 진짜 시각이다.                  */
+
+function tick() {
+  const d = new Date();
+  let h = d.getHours();
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  el.clock.textContent = `${String(h).padStart(2, '0')}:${mm}${ampm}`;
+}
+
+/* ── 검색 줄 그리기 ─────────────────────────────────── */
+
+const PROMPT = 'SEARCH: ';
+
+function paintSearch() {
+  const value = el.keeper.value;
+  el.shown.textContent = PROMPT + value;
+
+  // 커서는 입력 지점 위에 놓는다. IME 조합 중에도 selectionStart가 따라온다.
+  const at = el.keeper.selectionStart ?? value.length;
+  const col = width(PROMPT) + width(value.slice(0, at));
+  el.cursor.style.left = `${col}ch`;
+
+  el.cursor.classList.toggle('hidden', !state.insert);
+  el.cursor.classList.toggle('blink', state.insert);
+}
+
+/* ── 표 그리기 ─────────────────────────────────────── */
+
+/** 하드 이름 칸의 폭. 가장 긴 이름에 맞추되 헤더 `HDD`보다는 좁히지 않는다. */
+function hddWidth() {
+  let w = 3;
+  for (const h of state.hits) w = Math.max(w, width(h.drive_label));
+  return Math.min(w, COLS - 8);   // 이름 칸이 다 먹히지 않게 상한을 둔다
+}
+
+function paintHead() {
+  if (state.kind === 'drive') {
+    el.rule.textContent = rule('INDEX');
+    el.head.textContent =
+      'HDD'.padEnd(12) + 'VOLUME'.padEnd(13) + 'FORMAT'.padEnd(9) + ' FOLDER';
+    return;
+  }
+
+  if (state.kind === 'browse') {
+    const n = state.items.length;
+    const more = state.truncated ? '+' : '';
+    el.rule.textContent = rule(n ? `${comma(n)}${more} ITEMS` : 'EMPTY');
+    el.head.textContent = 'NAME'.padEnd(COLS - SIZE_W) + 'SIZE'.padStart(SIZE_W);
+    return;
+  }
+
+  const n = state.hits.length;
+  const more = state.truncated ? '+' : '';
+  el.rule.textContent = rule(n ? `${comma(n)}${more} FOUND` : 'NOT FOUND');
+
+  // 하드 이름 칸을 표의 오른쪽 끝에 붙인다. 헤더 `HDD`는 그 칸의 첫 글자
+  // 자리에서 시작하므로 `Works D`의 `W`와 세로로 나란해진다.
+  const w = hddWidth();
+  el.list.style.setProperty('--name-w', `${COLS - w}ch`);
+  el.list.style.setProperty('--hdd-w', `${w}ch`);
+  el.head.textContent = 'NAME'.padEnd(COLS - w) + 'HDD';
+}
+
+function paintList() {
+  el.list.textContent = '';
+
+  if (state.note) {
+    const d = document.createElement('div');
+    d.className = 'note';
+    d.textContent = state.note;
+    el.list.appendChild(d);
+    return;
+  }
+
+  state.rows.forEach((row, i) => {
+    const div = document.createElement('div');
+    div.className = 'row ' + state.kind;
+    if (i === state.sel) div.classList.add('sel');
+
+    let cells;
+    if (state.kind === 'browse') {
+      const label = row.up ? '..' : row.name + (row.is_dir ? '/' : '');
+      cells = [
+        [fit(label, COLS - SIZE_W - 1), ''],
+        [row.up ? '' : (row.is_dir ? '--' : humanSize(row.size)), 'num'],
+      ];
+    } else if (state.kind === 'drive') {
+      if (!row.connected) div.classList.add('off');
+      cells = [
+        [fit(row.label, 11), ''],
+        [row.serial, ''],
+        [fit(row.filesystem, 8), ''],
+        [comma(row.dir_count), 'num'],
+      ];
+    } else {
+      const w = hddWidth();
+      cells = [
+        // 이름과 하드 이름이 붙지 않도록 한 칸을 비워 둔다.
+        [fit(row.name + (row.is_dir ? '/' : ''), COLS - w - 1), ''],
+        [fit(row.drive_label, w), ''],
+      ];
+    }
+
+    for (const [text, cls] of cells) {
+      const s = document.createElement('span');
+      if (cls) s.className = cls;
+      s.textContent = text;
+      div.appendChild(s);
+    }
+
+    div.addEventListener('mousedown', e => {
+      e.preventDefault();   // 검색창의 포커스를 뺏지 않는다
+      select(i);
+    });
+    div.addEventListener('dblclick', e => { e.preventDefault(); enter(); });
+    el.list.appendChild(div);
+  });
+}
+
+/** 목록 아래에 아직 더 있으면 `-- MORE --`를 켠다. */
+function paintMore() {
+  const l = el.list;
+  const hasMore = l.scrollHeight - l.scrollTop - l.clientHeight > 1;
+  el.more.classList.toggle('off', !hasMore);
+}
+
+/** 선택된 항목이 어디에 있는지 하단에 알린다. 이 도구의 존재 이유다. */
+function paintWhere() {
+  const row = state.rows[state.sel];
+  if (!row) { el.where.textContent = ''; return; }
+
+  if (state.kind === 'drive') {
+    el.where.textContent = row.connected
+      ? `${row.label} : ${row.letter}: 연결됨 · ${comma(row.entry_count)}개 항목`
+      : `${row.label} : 연결 안 됨 · ${comma(row.entry_count)}개 항목`;
+  } else if (state.kind === 'browse') {
+    // `..` 줄에 서 있으면 지금 보고 있는 폴더 자체를 가리킨다.
+    const at = row.up ? state.browse.dir : row.path;
+    el.where.textContent = `${state.browse.label} : ${SEP}${at}`;
+  } else {
+    el.where.textContent = `${row.drive_label} : ${SEP}${row.path}`;
+  }
+}
+
+function paintStatus() {
+  el.vim.textContent = `VIM MODE  [${state.vim ? 'ON' : 'OFF'}]`;
+  el.mode.textContent = state.insert ? '--INSERT--' : '--NORMAL--';
+}
+
+function paintAll() {
+  paintHead();
+  paintList();
+  paintWhere();
+  paintStatus();
+  paintSearch();
+  paintMore();
+}
+
+/* ── 선택 이동 ─────────────────────────────────────── */
+
+function select(i) {
+  if (!state.rows.length) return;
+  state.sel = Math.max(0, Math.min(state.rows.length - 1, i));
+  paintList();
+  paintWhere();
+  const node = el.list.children[state.sel];
+  if (node) node.scrollIntoView({ block: 'nearest' });
+  paintMore();
+}
+
+/** 한 화면에 들어가는 행 수. 좌우 키가 한 화면씩 움직이는 데 쓴다. */
+function page() {
+  return Math.max(1, Math.round(el.list.clientHeight / LINE));
+}
+
+/* ── 데이터 ────────────────────────────────────────── */
+
+async function loadDrives() {
+  try {
+    const r = await fetch('/api/drives');
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    state.drives = data.drives;
+    // 목록을 불러오는 동안 사용자가 이미 검색어를 쳤을 수 있다.
+    // 그때 기본 화면으로 되돌리면 방금 띄운 결과가 지워진다.
+    if (!el.keeper.value.trim()) {
+      state.kind = 'drive';
+      state.rows = state.drives;
+      state.sel = 0;
+      state.note = state.drives.length ? '' : '인덱싱된 하드가 없습니다.';
+    }
+  } catch (e) {
+    state.note = '인덱스를 읽을 수 없습니다: ' + e.message;
+    state.rows = [];
+  }
+  paintAll();
+}
+
+let searchTimer = null;
+let searchSeq = 0;
+
+async function runSearch(q) {
+  const seq = ++searchSeq;
+
+  if (!q.trim()) {
+    state.browse = null;
+    state.origin = null;
+    state.truncated = false;                 // 검색어를 지우면 기본 화면으로 돌아온다
+    state.kind = 'drive';
+    state.rows = state.drives;
+    state.sel = 0;
+    state.note = state.drives.length ? '' : '인덱싱된 하드가 없습니다.';
+    paintAll();
+    return;
+  }
+
+  try {
+    const r = await fetch('/api/search?q=' + encodeURIComponent(q));
+    const data = await r.json();
+    if (seq !== searchSeq) return;   // 더 최근 검색이 이미 떠났다
+    if (data.error) throw new Error(data.error);
+
+    state.hits = data.hits;
+    state.truncated = !!data.truncated;
+    state.hitsTruncated = !!data.truncated;
+    state.origin = null;
+    state.kind = 'hit';
+    state.rows = state.hits;
+    state.sel = 0;
+    state.note = state.hits.length ? '' : '찾은 것이 없습니다.';
+  } catch (e) {
+    if (seq !== searchSeq) return;
+    state.rows = [];
+    state.note = '검색에 실패했습니다: ' + e.message;
+  }
+  paintAll();
+}
+
+/* ── 탐색 ─────────────────────────────────────────── */
+
+/** 폴더 하나를 펼친다. 하드가 꽂혀 있지 않아도 인덱스에 남은 것을 보여 준다. */
+async function openDir(serial, label, dir, from) {
+  try {
+    const q = `serial=${encodeURIComponent(serial)}&dir=${encodeURIComponent(dir)}`;
+    const r = await fetch('/api/list?' + q);
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+
+    if (from) state.origin = from;   // 여기서 나가면 검색 결과로 되돌아간다
+    state.browse = { serial, label, dir };
+    state.items = data.items;
+    state.truncated = !!data.truncated;
+    state.kind = 'browse';
+    state.rows = [UP_ROW, ...data.items];
+    state.sel = 0;
+    state.note = '';
+  } catch (e) {
+    state.rows = [];
+    state.note = '폴더를 열 수 없습니다: ' + e.message;
+  }
+  paintAll();
+}
+
+/** 한 단계 위로. 루트에서 더 올라가면 하드 목록으로 돌아간다. */
+function goUp() {
+  const b = state.browse;
+  if (!b) return;
+
+  // 검색 결과에서 들어온 폴더라면 상위 폴더가 아니라 그 결과로 돌아간다.
+  // 더 깊이 들어갔다가 올라오는 길에도 이 자리에서 결과로 빠져나온다.
+  const o = state.origin;
+  if (o && o.serial === b.serial && o.dir === b.dir) return backToSearch();
+
+  if (!b.dir) return showDrives();
+  const cut = b.dir.lastIndexOf(SEP);
+  openDir(b.serial, b.label, cut < 0 ? '' : b.dir.slice(0, cut));
+}
+
+/** 하드 목록 화면으로 되돌린다. */
+/** 검색 결과 화면으로 되돌린다. 다시 조회하지 않고 들고 있던 것을 그대로 쓴다. */
+function backToSearch() {
+  state.sel = Math.min(state.origin.sel, Math.max(0, state.hits.length - 1));
+  state.kind = 'hit';
+  state.rows = state.hits;
+  state.truncated = state.hitsTruncated;
+  state.browse = null;
+  state.origin = null;
+  state.note = state.hits.length ? '' : '찾은 것이 없습니다.';
+  paintAll();
+}
+
+function showDrives() {
+  state.kind = 'drive';
+  state.browse = null;
+  state.origin = null;
+  state.truncated = false;
+  state.rows = state.drives;
+  state.sel = 0;
+  state.note = state.drives.length ? '' : '인덱싱된 하드가 없습니다.';
+  paintAll();
+}
+
+/** 지금 줄을 연다. 하드면 그 루트를, 폴더면 그 안을 펼친다. */
+function enter() {
+  const row = state.rows[state.sel];
+  if (!row) return;
+  if (state.kind === 'drive') return openDir(row.serial, row.label, '');
+  if (row.up) return goUp();
+  if (!row.is_dir) return;            // 파일은 열어 볼 내용이 없다
+  const from = state.kind === 'hit'
+    ? { serial: row.drive_serial, dir: row.path, sel: state.sel }
+    : null;
+  openDir(row.drive_serial, row.drive_label, row.path, from);
+}
+
+function onInput() {
+  paintSearch();
+  clearTimeout(searchTimer);
+  const q = el.keeper.value;
+  searchTimer = setTimeout(() => runSearch(q), 140);
+}
+
+/* ── 모드 ──────────────────────────────────────────── */
+
+function setInsert(on) {
+  // VIM을 꺼 두면 언제나 입력 상태다. 검색창이 늘 살아 있다.
+  state.insert = state.vim ? on : true;
+
+  // NORMAL로 갈 때는 입력칸의 포커스를 반드시 뗀다. 포커스가 남아 있으면
+  // 한글 IME가 그 칸을 붙들고 있어서, `j`가 `ㅓ` 조합으로 들어가 버린다.
+  // 그러면 키 처리기가 `isComposing`에서 멈춰 hjkl이 아예 동작하지 않는다.
+  if (state.insert) el.keeper.focus();
+  else el.keeper.blur();
+
+  paintStatus();
+  paintSearch();
+}
+
+function toggleVim() {
+  state.vim = !state.vim;
+  setInsert(!state.vim ? true : false);   // 켜는 순간 NORMAL로 들어간다
+}
+
+el.list.addEventListener('scroll', paintMore);
+el.vim.addEventListener('mousedown', e => { e.preventDefault(); toggleVim(); });
+el.bar.addEventListener('mousedown', () => setInsert(true));
+
+/* ── 키 ────────────────────────────────────────────── */
+
+let composing = false;
+el.keeper.addEventListener('compositionstart', () => { composing = true; });
+el.keeper.addEventListener('compositionend',  () => { composing = false; onInput(); });
+el.keeper.addEventListener('input', () => { if (!composing) onInput(); paintSearch(); });
+el.keeper.addEventListener('click', paintSearch);
+
+document.addEventListener('keydown', e => {
+  // 한글 조합 중에는 어떤 키도 가로채지 않는다. 조합이 깨진다.
+  if (composing || e.isComposing) return;
+  if (e.ctrlKey || e.altKey || e.metaKey) return;
+
+  const move = d => { e.preventDefault(); select(state.sel + d); };
+
+  switch (e.key) {
+    case 'ArrowDown':  return move(1);
+    case 'ArrowUp':    return move(-1);
+    case 'ArrowRight': if (!state.insert) return move(page());  break;
+    case 'ArrowLeft':  if (!state.insert) return move(-page()); break;
+    case 'Escape':
+      // ESC는 VIM 모드를 켜면서 NORMAL로 들어간다. 마우스 없이도
+      // hjkl을 쓸 수 있어야 하므로 켜져 있는지 따지지 않는다.
+      e.preventDefault();
+      state.vim = true;
+      setInsert(false);
+      return;
+    case 'Enter':
+      e.preventDefault();
+      enter();
+      return;
+  }
+
+  // INSERT 중이면 나머지 키는 모두 검색어다. 커서 위치만 다시 그린다.
+  if (state.insert) { setTimeout(paintSearch, 0); return; }
+
+  // 여기부터는 VIM NORMAL 모드다.
+  switch (e.key) {
+    case 'j': case 'J': return move(1);
+    case 'k': case 'K': return move(-1);
+    case 'l': case 'L': return move(page());
+    case 'h': case 'H': return move(-page());
+    case 'g': e.preventDefault(); return select(0);
+    case 'G': e.preventDefault(); return select(state.rows.length - 1);
+    case 'i': case '/': e.preventDefault(); return setInsert(true);
+  }
+});
+
+// 검색창 밖을 눌러도 입력이 이어지도록 포커스를 되돌린다.
+document.addEventListener('mousedown', () => { if (state.insert) el.keeper.focus(); });
+
+/* ── 시작 ──────────────────────────────────────────── */
+
+window.addEventListener('resize', () => { fitList(); paintMore(); });
+
+tick();
+setInterval(tick, 1000);
+fitList();
+paintAll();
+loadDrives();
+el.keeper.focus();
+</script>
+</body>
+</html>

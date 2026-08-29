@@ -8,6 +8,7 @@ mod elevation;
 mod install;
 mod mcp;
 mod scan;
+mod serve;
 mod sync;
 mod task;
 mod volume;
@@ -90,6 +91,16 @@ enum Cmd {
     /// MCP 서버를 실행합니다 (Claude가 자동으로 호출합니다)
     Mcp,
 
+    /// 브라우저로 인덱스를 볼 수 있게 로컬 웹 화면을 띄웁니다
+    Serve {
+        /// 열 포트
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        /// 브라우저를 자동으로 열지 않습니다
+        #[arg(long)]
+        no_open: bool,
+    },
+
     /// 외장하드 연결 시 자동 인덱싱하도록 작업 스케줄러에 등록합니다
     SetupTask,
 
@@ -117,6 +128,7 @@ fn run() -> Result<()> {
         Cmd::Install => install::install(),
         Cmd::Uninstall => install::uninstall(),
         Cmd::Mcp => mcp::serve(),
+        Cmd::Serve { port, no_open } => serve::serve(port, !no_open),
         Cmd::SetupTask => cmd_setup_task(),
         Cmd::RemoveTask => cmd_remove_task(),
     }

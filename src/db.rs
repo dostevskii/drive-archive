@@ -367,6 +367,66 @@ pub fn search(
     Ok(hits)
 }
 
+/// 폴더 하나의 **바로 아래** 항목만 나열한다. 하드를 연결하지 않아도 된다.
+///
+/// `dir`는 드라이브 루트 기준 상대 경로이고, 빈 문자열이면 루트다.
+/// 구분자는 `\`이며, 저장된 경로도 같은 형식이다 (`Company Works\2024`).
+///
+/// 경로를 `LIKE`로 맞추지 않는다. 폴더 이름에 `_`나 `%`가 들어가면
+/// 엉뚱한 폴더가 딸려 오기 때문이다. 글자 수로 앞부분을 잘라 비교한다.
+pub fn list_children(
+    conn: &Connection,
+    serial: &str,
+    dir: &str,
+    limit: usize,
+) -> Result<Vec<SearchHit>> {
+    let found: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT id, label FROM drives WHERE volume_serial = ?1",
+            params![serial],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((drive_id, label)) = found else {
+        anyhow::bail!("인덱스에 없는 하드입니다: {serial}");
+    };
+
+    let trimmed = dir.trim_matches('\\');
+    let prefix = if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}\\")
+    };
+    let plen = prefix.chars().count() as i64;
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT path, name, is_dir, size, mtime
+        FROM entries
+        WHERE drive_id = ?1
+          AND substr(path, 1, ?2) = ?3
+          AND instr(substr(path, ?2 + 1), '\') = 0
+        ORDER BY is_dir DESC, name
+        LIMIT ?4
+        "#,
+    )?;
+
+    let rows = stmt.query_map(params![drive_id, plen, prefix, limit as i64], |r| {
+        let mtime: i64 = r.get(4)?;
+        Ok(SearchHit {
+            drive_label: label.clone(),
+            drive_serial: serial.to_string(),
+            path: r.get(0)?,
+            name: r.get(1)?,
+            is_dir: r.get::<_, i64>(2)? != 0,
+            size: r.get::<_, i64>(3)? as u64,
+            modified: format_date(mtime),
+        })
+    })?;
+
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// 인덱스에 등록된 하드 하나.
 #[derive(Debug, Clone, Serialize)]
 pub struct DriveRow {
@@ -377,6 +437,8 @@ pub struct DriveRow {
     pub total_bytes: u64,
     pub free_bytes: u64,
     pub entry_count: i64,
+    /// 이 하드에 들어 있는 폴더 수. `entry_count`에서 파일을 뺀 나머지다.
+    pub dir_count: i64,
     pub first_seen: String,
     pub last_seen: String,
     pub last_scan_at: Option<String>,
@@ -394,6 +456,7 @@ pub fn list_drives(conn: &Connection) -> Result<Vec<DriveRow>> {
         r#"
         SELECT d.label, d.volume_serial, d.filesystem, d.total_bytes, d.free_bytes,
                (SELECT COUNT(*) FROM entries e WHERE e.drive_id = d.id),
+               (SELECT COUNT(*) FROM entries e WHERE e.drive_id = d.id AND e.is_dir = 1),
                d.first_seen, d.last_seen, d.last_scan_at
         FROM drives d
         ORDER BY d.label
@@ -407,9 +470,10 @@ pub fn list_drives(conn: &Connection) -> Result<Vec<DriveRow>> {
             total_bytes: r.get::<_, i64>(3)? as u64,
             free_bytes: r.get::<_, i64>(4)? as u64,
             entry_count: r.get(5)?,
-            first_seen: r.get(6)?,
-            last_seen: r.get(7)?,
-            last_scan_at: r.get(8)?,
+            dir_count: r.get(6)?,
+            first_seen: r.get(7)?,
+            last_seen: r.get(8)?,
+            last_scan_at: r.get(9)?,
             connected: false,
             letter: None,
         })
@@ -497,6 +561,16 @@ mod tests {
         )
         .unwrap();
         conn.last_insert_rowid()
+    }
+
+    fn dir(path: &str) -> Entry {
+        Entry {
+            path: path.to_string(),
+            name: path.rsplit('\\').next().unwrap().to_string(),
+            is_dir: true,
+            size: 0,
+            mtime: 0,
+        }
     }
 
     fn file(path: &str, size: u64, mtime: i64) -> Entry {
@@ -668,6 +742,64 @@ mod tests {
         let hits = search(&conn, "브랜딩", None, true, 50).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].is_dir);
+    }
+
+    fn names(hits: &[SearchHit]) -> Vec<&str> {
+        hits.iter().map(|h| h.name.as_str()).collect()
+    }
+
+    #[test]
+    fn 폴더_바로_아래_항목만_나열한다() {
+        let mut conn = test_db();
+        let d = test_drive(&conn, "AAAA0001", "Works D");
+        apply_scan(
+            &mut conn,
+            d,
+            &[
+                dir("Company Works"),
+                dir(r"Company Works\2024"),
+                file(r"Company Works\2024\최종.psd", 100, 0),
+                file(r"Company Works\메모.txt", 10, 0),
+                dir("MAYA"),
+                file("루트.txt", 1, 0),
+            ],
+        )
+        .unwrap();
+
+        // 루트에서는 한 단계 아래만 보인다. `2024`나 `최종.psd`는 딸려 오지 않는다.
+        let root = list_children(&conn, "AAAA0001", "", 100).unwrap();
+        assert_eq!(names(&root), vec!["Company Works", "MAYA", "루트.txt"]);
+
+        // 폴더 안으로 들어가면 그 안의 한 단계만 보인다. 폴더가 파일보다 먼저다.
+        let sub = list_children(&conn, "AAAA0001", "Company Works", 100).unwrap();
+        assert_eq!(names(&sub), vec!["2024", "메모.txt"]);
+    }
+
+    #[test]
+    fn 폴더_이름의_밑줄은_아무_글자가_아니다() {
+        // `LIKE`로 맞췄다면 `A_B\%`가 `AXB`의 파일까지 잡는다.
+        let mut conn = test_db();
+        let d = test_drive(&conn, "AAAA0001", "Works D");
+        apply_scan(
+            &mut conn,
+            d,
+            &[
+                dir("A_B"),
+                file(r"A_B\안.txt", 1, 0),
+                dir("AXB"),
+                file(r"AXB\밖.txt", 1, 0),
+            ],
+        )
+        .unwrap();
+
+        let hits = list_children(&conn, "AAAA0001", "A_B", 100).unwrap();
+        assert_eq!(names(&hits), vec!["안.txt"]);
+    }
+
+    #[test]
+    fn 인덱스에_없는_하드를_열면_오류다() {
+        let conn = test_db();
+        assert!(list_children(&conn, "NOSUCH01", "", 10).is_err());
     }
 
     #[test]
