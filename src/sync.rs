@@ -7,9 +7,11 @@ use anyhow::{Context, Result, bail};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::windows::fs::OpenOptionsExt;
+use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
 use windows::Win32::System::Threading::{
     BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass,
 };
+use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
 
 use crate::db;
 use crate::scan;
@@ -46,6 +48,27 @@ impl InstanceLock {
             Ok(f) => Ok(Some(InstanceLock { _file: f })),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(None),
             Err(e) => Err(e).with_context(|| format!("잠금 파일을 만들 수 없습니다: {}", path.display())),
+        }
+    }
+}
+
+/// 우리 때문에 새로 뜬 콘솔 창이라면 숨긴다.
+///
+/// 작업 스케줄러가 이 프로그램을 깨우면 대화형 세션에 검은 콘솔 창이 나타난다.
+/// 사용자는 아무것도 하지 않았는데 화면에 창이 뜨는 셈이라 방해가 된다.
+///
+/// 콘솔에 붙어 있는 프로세스가 자기 하나뿐이면 그 창은 이 프로세스 때문에 새로 만들어진
+/// 것이므로 숨긴다. 사용자가 터미널에서 직접 실행했다면 셸도 같은 콘솔을 쓰고 있어
+/// 둘 이상이 잡히고, 그때는 출력이 보여야 하므로 건드리지 않는다.
+pub fn hide_console_if_ours() {
+    unsafe {
+        let mut pids = [0u32; 2];
+        if GetConsoleProcessList(&mut pids) != 1 {
+            return;
+        }
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_invalid() {
+            let _ = ShowWindow(hwnd, SW_HIDE);
         }
     }
 }
@@ -149,12 +172,27 @@ pub enum SyncOutcome {
     Failed { label: String, letter: char, reason: String },
 }
 
-/// 지금 연결된 외장하드를 모두 확인해 인덱스를 갱신한다.
+/// 지금 연결된 외장하드를 확인해 인덱스를 갱신한다.
 ///
 /// 작업 스케줄러가 호출하는 경로이자 `drive-archive sync`가 하는 일이다.
 /// `force`가 참이면 방금 스캔한 하드도 다시 훑는다.
-pub fn sync_all(force: bool) -> Result<Vec<SyncOutcome>> {
-    let volumes = volume::list_external_volumes();
+///
+/// `only`에 드라이브 문자를 주면 그 하드만 본다. 마운트 이벤트에는 어느 볼륨이 붙었는지가
+/// 담겨 있으므로, 스케줄러가 그 값을 넘겨 주면 하드 하나를 꽂았을 때 나머지까지 헛되이
+/// 훑지 않는다. 로그온 트리거처럼 볼륨을 알 수 없는 경로로 실행되면 `None`이라 전부 확인한다.
+pub fn sync_all(force: bool, only: Option<char>) -> Result<Vec<SyncOutcome>> {
+    let mut volumes = volume::list_external_volumes();
+
+    if let Some(letter) = only {
+        volumes.retain(|v| v.letter.eq_ignore_ascii_case(&letter));
+        if volumes.is_empty() {
+            // 내장 디스크나 카드리더에서도 같은 이벤트가 난다. 전부 훑는 것으로 되돌리면
+            // 좁힌 의미가 없으므로, 대상이 아니면 그냥 물러난다.
+            log(&format!("{letter}: 드라이브는 인덱싱 대상이 아니므로 넘어갑니다"));
+            return Ok(Vec::new());
+        }
+    }
+
     if volumes.is_empty() {
         log("연결된 외장하드가 없습니다");
         return Ok(Vec::new());

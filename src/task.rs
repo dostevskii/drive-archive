@@ -21,6 +21,16 @@ pub const TASK_NAME: &str = "drive-archive sync";
 const MOUNT_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Path=&quot;System&quot;&gt;&lt;Select Path=&quot;System&quot;&gt;*[System[Provider[@Name='Microsoft-Windows-Ntfs'] and EventID=98]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;";
 
 /// 작업 정의 XML을 만든다.
+///
+/// `LogonType`이 `S4U`인 이유는 콘솔 창 때문이다. `InteractiveToken`으로 두면 스케줄러가
+/// 깨울 때마다 대화형 세션에 검은 콘솔 창이 떠서, 사용자가 아무것도 하지 않았는데 화면에
+/// 창이 나타난다. S4U는 같은 계정으로 실행하되 대화형 세션에 붙지 않으므로 창이 아예 뜨지
+/// 않고, `Password`와 달리 비밀번호를 저장할 필요도 없다.
+///
+/// 마운트 이벤트에는 어느 볼륨이 붙었는지가 `DriveName`(`L:` 형태)으로 들어 있다. 값 쿼리로
+/// 그 값을 꺼내 `sync --drive`에 넘기면 방금 꽂은 하드만 훑는다. 로그온 트리거나
+/// `schtasks /Run`처럼 값이 없는 경로로 실행되면 치환되지 않은 문자열이 그대로 넘어오는데,
+/// `sync` 쪽에서 드라이브 문자로 읽히지 않는 값은 무시하고 연결된 하드를 전부 확인한다.
 fn task_xml(exe: &Path) -> Result<String> {
     let user = std::env::var("USERNAME").context("USERNAME 환경 변수를 읽을 수 없습니다")?;
     let domain = std::env::var("USERDOMAIN").unwrap_or_else(|_| ".".to_string());
@@ -38,6 +48,9 @@ fn task_xml(exe: &Path) -> Result<String> {
       <Enabled>true</Enabled>
       <Subscription>{MOUNT_EVENT_QUERY}</Subscription>
       <Delay>PT15S</Delay>
+      <ValueQueries>
+        <Value name="DriveName">Event/EventData/Data[@Name='DriveName']</Value>
+      </ValueQueries>
     </EventTrigger>
     <LogonTrigger>
       <Enabled>true</Enabled>
@@ -47,7 +60,7 @@ fn task_xml(exe: &Path) -> Result<String> {
   <Principals>
     <Principal id="Author">
       <UserId>{domain}\{user}</UserId>
-      <LogonType>InteractiveToken</LogonType>
+      <LogonType>S4U</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>
     </Principal>
   </Principals>
@@ -73,7 +86,7 @@ fn task_xml(exe: &Path) -> Result<String> {
   <Actions Context="Author">
     <Exec>
       <Command>{exe}</Command>
-      <Arguments>sync</Arguments>
+      <Arguments>sync --drive $(DriveName)</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -192,7 +205,21 @@ mod tests {
     fn xml에_실행_경로와_sync_인자가_들어간다() {
         let xml = task_xml(Path::new("C:\\Tools\\drive-archive.exe")).unwrap();
         assert!(xml.contains("<Command>C:\\Tools\\drive-archive.exe</Command>"));
-        assert!(xml.contains("<Arguments>sync</Arguments>"));
+        assert!(xml.contains("<Arguments>sync --drive $(DriveName)</Arguments>"));
+    }
+
+    #[test]
+    fn xml에_마운트된_볼륨을_넘기는_값_쿼리가_있다() {
+        let xml = task_xml(Path::new("x.exe")).unwrap();
+        assert!(xml.contains(r#"<Value name="DriveName">Event/EventData/Data[@Name='DriveName']</Value>"#));
+    }
+
+    #[test]
+    fn 콘솔_창이_뜨지_않도록_s4u로_실행된다() {
+        // InteractiveToken이면 스케줄러가 깨울 때마다 화면에 콘솔 창이 뜬다.
+        let xml = task_xml(Path::new("x.exe")).unwrap();
+        assert!(xml.contains("<LogonType>S4U</LogonType>"));
+        assert!(!xml.contains("InteractiveToken"));
     }
 
     #[test]

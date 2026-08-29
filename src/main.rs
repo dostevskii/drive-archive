@@ -34,6 +34,9 @@ enum Cmd {
         /// 방금 스캔한 하드도 다시 훑습니다
         #[arg(long)]
         force: bool,
+        /// 이 드라이브만 확인합니다 (예: L:). 생략하면 연결된 하드를 모두 확인합니다
+        #[arg(long)]
+        drive: Option<String>,
     },
 
     /// 하드 하나를 수동으로 전체 재스캔합니다
@@ -103,7 +106,7 @@ fn main() {
 
 fn run() -> Result<()> {
     match Cli::parse().command {
-        Cmd::Sync { force } => cmd_sync(force),
+        Cmd::Sync { force, drive } => cmd_sync(force, drive.as_deref()),
         Cmd::Scan { drive } => cmd_scan(drive),
         Cmd::Search { keyword, drive, dirs_only, limit, json } => {
             cmd_search(&keyword, drive.as_deref(), dirs_only, limit, json)
@@ -121,7 +124,27 @@ fn run() -> Result<()> {
 
 // ---------------------------------------------------------------- 명령 구현
 
-fn cmd_sync(force: bool) -> Result<()> {
+/// 작업 스케줄러가 넘겨준 드라이브 값을 문자 하나로 읽는다.
+///
+/// 마운트 이벤트에는 `L:` 형태로 담겨 있다. 값 쿼리가 치환되지 않은 채 `$(DriveName)`처럼
+/// 그대로 넘어오거나 빈 문자열이 오는 경우가 있으므로, 알파벳 한 글자로 읽히지 않으면
+/// 지정이 없는 것으로 보고 연결된 하드를 전부 확인한다.
+fn parse_drive_letter(raw: &str) -> Option<char> {
+    let mut chars = raw.trim().chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    match chars.next() {
+        None | Some(':') => Some(first),
+        Some(_) => None,
+    }
+}
+
+fn cmd_sync(force: bool, drive: Option<&str>) -> Result<()> {
+    // 스케줄러가 깨웠다면 이 시점에 콘솔 창이 화면에 떠 있다. 먼저 치운다.
+    sync::hide_console_if_ours();
+
     let Some(_lock) = sync::InstanceLock::acquire()? else {
         // 이미 다른 인스턴스가 스캔 중이다. 조용히 물러난다.
         sync::log("이미 실행 중이므로 종료합니다");
@@ -129,9 +152,13 @@ fn cmd_sync(force: bool) -> Result<()> {
     };
     sync::lower_priority();
 
-    let outcomes = sync::sync_all(force)?;
+    let only = drive.and_then(parse_drive_letter);
+    let outcomes = sync::sync_all(force, only)?;
     if outcomes.is_empty() {
-        println!("연결된 외장하드가 없습니다.");
+        match only {
+            Some(letter) => println!("{letter}: 드라이브는 인덱싱 대상이 아닙니다."),
+            None => println!("연결된 외장하드가 없습니다."),
+        }
         return Ok(());
     }
 
@@ -412,6 +439,23 @@ mod tests {
     fn cli_인자가_파싱된다() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn 스케줄러가_넘긴_드라이브_값을_문자로_읽는다() {
+        assert_eq!(parse_drive_letter("L:"), Some('L'));
+        assert_eq!(parse_drive_letter("L"), Some('L'));
+        assert_eq!(parse_drive_letter(" J: "), Some('J'));
+    }
+
+    #[test]
+    fn 치환되지_않은_값은_지정이_없는_것으로_본다() {
+        // 로그온 트리거나 schtasks /Run으로 실행되면 값 쿼리가 치환되지 않는다.
+        // 그때는 어느 볼륨인지 알 수 없으므로 연결된 하드를 전부 확인해야 한다.
+        assert_eq!(parse_drive_letter("$(DriveName)"), None);
+        assert_eq!(parse_drive_letter(""), None);
+        assert_eq!(parse_drive_letter("   "), None);
+        assert_eq!(parse_drive_letter("12"), None);
     }
 
     fn hit(label: &str, serial: &str) -> db::SearchHit {
