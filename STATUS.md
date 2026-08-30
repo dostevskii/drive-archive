@@ -1,6 +1,6 @@
 # 프로젝트 현황
 
-**최종 갱신:** 2026-08-29 · **버전:** v0.3.0 · **상태:** 전 기능 실기 검증 완료
+**최종 갱신:** 2026-08-30 · **버전:** v0.3.1 · **상태:** 전 기능 실기 검증 완료
 
 ---
 
@@ -23,21 +23,24 @@
 | 꽂은 하드만 스캔 | 동작 · 값 쿼리 치환 실기 확인 |
 | 브라우저 웹 화면 (`serve`) | 동작 · 실제 Chrome에서 검색·탐색·선택·VIM 확인 |
 
-### 인덱싱된 하드 (2026-08-29 기준)
+### 인덱싱된 하드 (2026-08-30 기준)
 
 | 라벨 | 포맷 | 항목 수 | 볼륨 시리얼 |
 |---|---|---|---|
+| Works C | NTFS | 49,570 | 44C550BC |
 | Works D | NTFS | 22,662 | 90FA8BC5 |
 | Works E | NTFS | 171,139 | 0480390F |
 | Works F | NTFS | 0 (빈 하드) | C482BDB6 |
 
-전체 193,801개 항목 · 인덱스 63.3MB · `%LOCALAPPDATA%\drive-archive\index.db`
+전체 243,371개 항목 · 인덱스 79.1MB · `%LOCALAPPDATA%\drive-archive\index.db`
+
+**Works C는 2026-08-30에 자동으로 들어왔습니다.** 처음 보는 4TB 하드를 꽂았더니 사람이 손대지 않은 채 15:06:36에 스캔이 시작되어 88초 만에 49,570개가 등록되었습니다. 마운트 이벤트 트리거가 새 하드를 잡아 처음부터 인덱싱하는 경로가 실사용에서 확인된 셈입니다.
 
 2026-08-28에 Works F의 자료를 Works E로 옮기고 Works F를 NTFS로 다시 포맷했습니다. 포맷으로 볼륨 시리얼이 `6C965A22`에서 `C482BDB6`으로 바뀌어, 옛 Works F 항목은 가리킬 대상이 없는 상태가 되었습니다. 인덱스를 통째로 비우고 세 하드를 처음부터 다시 훑었습니다.
 
 ### 규모
 
-Rust 3,709줄 (테스트 포함) · 10개 모듈 · 테스트 87개 · 웹 화면 HTML 690줄 · 실행 파일 3.46MB
+Rust 3,807줄 (테스트 포함) · 10개 모듈 · 테스트 90개 · 웹 화면 HTML 690줄 · 실행 파일 3.46MB
 
 실행 파일이 2.91MB에서 커진 것은 웹 화면과 폰트(FiraD2 Regular, 490KB)를 안에 넣었기 때문입니다. 배포할 파일은 여전히 exe 하나입니다.
 
@@ -60,6 +63,25 @@ Rust 3,709줄 (테스트 포함) · 10개 모듈 · 테스트 87개 · 웹 화�
 ---
 
 ## 개발 이력
+
+### v0.3.1 — Store판 Claude Desktop 대응 (2026-08-30)
+
+**Claude Desktop에 MCP가 등록되지 않는 결함을 고쳤습니다.** 사용자가 데스크톱 앱에서 물었더니 "drive-archive라는 이름의 MCP는 연결된 목록에 없습니다"라는 답이 돌아와 드러났습니다.
+
+원인은 배포판에 따라 설정 파일 위치가 다르다는 것이었습니다. Claude Desktop을 **Microsoft Store(MSIX)판**으로 설치하면 앱이 샌드박스 안에서 돌기 때문에, `%APPDATA%`에 쓴다고 여기는 내용이 패키지 폴더로 리디렉션됩니다.
+
+| 배포판 | 설정 파일 실제 위치 |
+|---|---|
+| 웹에서 받은 설치판 | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Store(MSIX)판 | `%LOCALAPPDATA%\Packages\Claude_<게시자>\LocalCache\Roaming\Claude\claude_desktop_config.json` |
+
+`install.rs`는 `%APPDATA%` 한 곳만 봤고, Store판만 깔린 이 컴퓨터에는 그 폴더가 아예 없습니다. `register_mcp`는 부모 폴더가 없으면 `Ok(false)`로 건너뛰므로, **실패한 것이 아니라 시도조차 되지 않았습니다.** 화면에는 "Claude를 찾지 못해 MCP 연결은 건너뛰었습니다"라고 찍혔을 텐데, Claude Code 쪽 등록은 성공해서 그 문구조차 나오지 않았습니다.
+
+`claude_desktop_configs()`가 두 위치를 모두 찾도록 고쳤습니다. 패키지 폴더 이름에는 게시자 해시가 붙으므로(`Claude_pzs8sxrjxfjjc`) 이름을 박아 두지 않고 `%LOCALAPPDATA%\Packages`에서 `Claude_`로 시작하는 폴더를 훑되, 설정 폴더가 실제로 있는 것만 남깁니다. 두 판을 함께 설치했다면 양쪽에 등록합니다.
+
+**검증:** 실기로 확인했습니다. 빌드한 exe로 `install`을 실행하니 Store판 설정에 `mcpServers.drive-archive`가 들어갔고, 기존 최상위 키 3개와 `preferences` 27개 항목이 하나도 바뀌지 않은 것을 백업본과 대조해 확인했습니다. 웹 설치판 경로는 없으므로 종전대로 건너뜁니다. 단위 테스트 3개를 더해 90개가 되었습니다(Store판 경로 탐색, Claude 아닌 패키지 제외, `Packages` 폴더 부재).
+
+**놓쳤던 이유:** 설정 파일이 하나뿐이라고 가정하고 경로를 상수로 박아 두었습니다. Claude Code 쪽이 성공하는 바람에 "적어도 한 곳에는 등록됨"으로 보여 결함이 가려졌습니다. 등록되지 않은 대상을 이름으로 알려 주지 않는 지금 구조에서는 같은 일이 또 가려질 수 있습니다.
 
 ### v0.3.0 — 브라우저로 인덱스 보기 (2026-08-29)
 
@@ -229,6 +251,7 @@ keep-alive를 쓰지 않고 응답마다 연결을 닫습니다. 로컬에서는
 - **개발 세션의 셸은 비관리자 토큰으로 실행됩니다.** 계정은 Administrators 소속이지만 UAC로 걸러져(`Group used for deny only`, Medium 무결성) 작업 스케줄러 **등록**이 거부됩니다. 단순한 `/SC ONLOGON` 작업 생성조차 `Access is denied`입니다.
 - **다만 이미 등록된 작업을 다루는 것은 비관리자로도 됩니다.** `schtasks /Run`, `/End`, `/Change /ENABLE|/DISABLE` 모두 관리자 권한 없이 동작합니다(2026-08-28 확인). 작업 소유자가 본인이기 때문입니다. `run_now`가 성립하는 근거이자, 큰 작업 전에 자동 인덱싱을 잠시 꺼 둘 수 있는 근거입니다.
 - **`target/release/drive-archive.exe`는 MCP 서버가 붙잡고 있으면 빌드로 덮어쓸 수 없습니다.** Claude 세션마다 `drive-archive.exe mcp` 프로세스가 하나씩 떠 있어, 여러 세션이 열려 있으면 `cargo build --release`가 `os error 5`로 실패합니다. 빌드 전에 `Get-Process drive-archive | Stop-Process -Force`로 정리하면 됩니다. 다음 요청 때 Claude가 알아서 다시 띄웁니다.
+- **이 컴퓨터의 Claude Desktop은 Microsoft Store(MSIX)판입니다.** (`Claude_1.40609.0.0_x64__pzs8sxrjxfjjc`) 설정 파일은 `%APPDATA%\Claude`가 아니라 `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\`에 있습니다. 앱에서 쓰는 Filesystem·Desktop Commander 같은 도구는 `mcpServers`가 아니라 확장(`Claude Extensions`)으로 설치된 것이라 이 파일과 무관합니다.
 - **이 컴퓨터에는 HFS/APFS 드라이버가 없습니다.** Windows 기본 드라이버는 NTFS·exFAT·FAT32·ReFS·UDF뿐입니다. Mac 포맷 하드는 드라이브 문자조차 뜨지 않습니다.
 - **빌드 도구:** Rust 1.95 (MSVC), Visual Studio 2019 Build Tools (MSVC 14.29).
 

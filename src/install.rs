@@ -13,10 +13,65 @@ use crate::task;
 /// MCP 설정에 등록될 서버 이름.
 const MCP_SERVER_NAME: &str = "drive-archive";
 
-/// Claude Desktop 설정 파일 경로: `%APPDATA%\Claude\claude_desktop_config.json`
-fn claude_desktop_config() -> Option<PathBuf> {
-    let appdata = std::env::var("APPDATA").ok()?;
-    Some(PathBuf::from(appdata).join("Claude").join("claude_desktop_config.json"))
+/// Claude Desktop 설정 파일 이름.
+const DESKTOP_CONFIG_NAME: &str = "claude_desktop_config.json";
+
+/// Claude Desktop 설정 파일 경로들.
+///
+/// 배포판에 따라 위치가 다르다.
+///
+/// - 웹에서 받은 설치판: `%APPDATA%\Claude\claude_desktop_config.json`
+/// - Microsoft Store(MSIX)판: 앱이 `%APPDATA%`에 쓴다고 여기는 내용이 패키지
+///   폴더 안으로 리디렉션되어, 실제 파일은
+///   `%LOCALAPPDATA%\Packages\Claude_<게시자>\LocalCache\Roaming\Claude\`에 놓인다.
+///   Store판만 깔려 있으면 `%APPDATA%\Claude`는 아예 생기지 않는다.
+///
+/// 두 판을 함께 깔 수 있으므로 찾은 곳을 모두 돌려준다.
+fn claude_desktop_configs() -> Vec<(&'static str, PathBuf)> {
+    let mut found = Vec::new();
+
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        found.push((
+            "Claude Desktop",
+            PathBuf::from(appdata).join("Claude").join(DESKTOP_CONFIG_NAME),
+        ));
+    }
+
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        found.extend(
+            store_desktop_configs(&PathBuf::from(local).join("Packages"))
+                .into_iter()
+                .map(|p| ("Claude Desktop (Store)", p)),
+        );
+    }
+
+    found
+}
+
+/// `%LOCALAPPDATA%\Packages` 아래에서 Store판 Claude의 설정 파일을 찾는다.
+///
+/// 패키지 폴더 이름에는 게시자 해시가 붙으므로(`Claude_pzs8sxrjxfjjc`) 이름을
+/// 박아 두지 않고 `Claude_`로 시작하는 폴더를 훑는다. 없거나 읽을 수 없으면
+/// 빈 목록을 돌려준다 — Store판을 안 쓰는 것이 정상적인 경우다.
+fn store_desktop_configs(packages: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(packages) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("Claude_"))
+        .map(|e| {
+            e.path()
+                .join("LocalCache")
+                .join("Roaming")
+                .join("Claude")
+                .join(DESKTOP_CONFIG_NAME)
+        })
+        // 같은 이름으로 시작하는 다른 패키지가 섞일 수 있으므로, 설정 폴더가
+        // 실제로 있는 것만 남긴다.
+        .filter(|p| p.parent().is_some_and(Path::exists))
+        .collect()
 }
 
 /// Claude Code 설정 파일 경로: `%USERPROFILE%\.claude.json`
@@ -207,13 +262,11 @@ pub fn uninstall() -> Result<()> {
 
 /// MCP를 등록할 대상 설정 파일 목록.
 fn claude_config_targets() -> Vec<(&'static str, PathBuf)> {
-    [
-        ("Claude Desktop", claude_desktop_config()),
-        ("Claude Code", claude_code_config()),
-    ]
-    .into_iter()
-    .filter_map(|(name, path)| path.map(|p| (name, p)))
-    .collect()
+    let mut targets = claude_desktop_configs();
+    if let Some(path) = claude_code_config() {
+        targets.push(("Claude Code", path));
+    }
+    targets
 }
 
 #[cfg(test)]
@@ -331,5 +384,50 @@ mod tests {
     fn 없는_파일을_제거해도_문제없다() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(!unregister_mcp(&tmp.path().join("없음.json")).unwrap());
+    }
+
+    /// `%LOCALAPPDATA%\Packages\<이름>\LocalCache\Roaming\Claude`를 만든다.
+    fn 패키지_설정폴더(packages: &Path, 이름: &str) {
+        std::fs::create_dir_all(
+            packages.join(이름).join("LocalCache").join("Roaming").join("Claude"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn store판_설정_경로를_찾는다() {
+        let tmp = tempfile::tempdir().unwrap();
+        let packages = tmp.path();
+        패키지_설정폴더(packages, "Claude_pzs8sxrjxfjjc");
+
+        let found = store_desktop_configs(packages);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0],
+            packages
+                .join("Claude_pzs8sxrjxfjjc")
+                .join("LocalCache")
+                .join("Roaming")
+                .join("Claude")
+                .join("claude_desktop_config.json")
+        );
+    }
+
+    #[test]
+    fn store판_아닌_패키지는_건너뛴다() {
+        let tmp = tempfile::tempdir().unwrap();
+        let packages = tmp.path();
+        패키지_설정폴더(packages, "Microsoft.WindowsCalculator_8wekyb3d8bbwe");
+        // 이름은 Claude로 시작하지만 설정 폴더가 없는 경우.
+        std::fs::create_dir_all(packages.join("Claude_다른앱")).unwrap();
+
+        assert!(store_desktop_configs(packages).is_empty());
+    }
+
+    #[test]
+    fn packages_폴더가_없어도_문제없다() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(store_desktop_configs(&tmp.path().join("Packages")).is_empty());
     }
 }
