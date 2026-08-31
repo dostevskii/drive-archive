@@ -2,8 +2,8 @@
 //!
 //! `setx`나 PowerShell의 `[Environment]::SetEnvironmentVariable`를 쓰지 않는다. 둘 다
 //! `Path` 값을 항상 `REG_SZ`로 다시 쓰기 때문에, 기존 값이 `REG_EXPAND_SZ`였다면
-//! (`%SystemRoot%\...`처럼 展開이 필요한 항목이 하나라도 있으면) 그 항목들이 더 이상
-//! 展開되지 않는 문자 그대로의 문자열로 굳어버린다. 레지스트리를 직접 읽고 써서
+//! (`%SystemRoot%\...`처럼 확장이 필요한 항목이 하나라도 있으면) 그 항목들이 더 이상
+//! 확장되지 않는 문자 그대로의 문자열로 굳어버린다. 레지스트리를 직접 읽고 써서
 //! 원래 있던 타입을 그대로 유지한다.
 
 use anyhow::{Context, Result};
