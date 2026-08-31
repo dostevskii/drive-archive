@@ -141,6 +141,19 @@
   #where  { white-space: pre; overflow: hidden; text-overflow: ellipsis; height: var(--line); }
   #vim    { white-space: pre; cursor: pointer; display: inline-block; }
   #mode   { white-space: pre; }
+
+  /* ── 비밀번호 게이트 ───────────────────────────────── */
+  /* 비밀번호를 묻는 동안에는 표와 목록을 감춘다. 자리는 남겨 두지 않는다 —
+     빈 표가 보이면 뒤에 뭔가 있다는 인상을 준다. */
+  body.gate #rule,
+  body.gate #head,
+  body.gate #list,
+  body.gate #more,
+  body.gate #vim,
+  body.gate #mode { display: none; }
+
+  /* `#where`는 남긴다. 틀렸다는 것과 잠금이 얼마나 남았는지 적을 자리가 필요하고,
+     그 줄에는 인덱스 내용이 들어가지 않는다. */
 </style>
 </head>
 <body>
@@ -212,6 +225,7 @@ const state = {
   insert: true,    // 입력 중인가 (VIM이 꺼져 있으면 항상 참)
   note:   '',      // 표 대신 띄울 안내 문구
   truncated: false, // 결과가 상한에 걸려 잘렸는가
+  gate:   false,   // 비밀번호를 묻는 중인가
 };
 
 /* ── 글자 폭 ────────────────────────────────────────────
@@ -288,19 +302,77 @@ function tick() {
 
 /* ── 검색 줄 그리기 ─────────────────────────────────── */
 
-const PROMPT = 'SEARCH: ';
+const SEARCH_PROMPT   = 'SEARCH: ';
+const PASSWORD_PROMPT = 'PASSWORD: ';
+
+function prompt_() { return state.gate ? PASSWORD_PROMPT : SEARCH_PROMPT; }
+
+/** 화면에 그릴 입력 글자. 비밀번호는 별표로 가린다. */
+function shownValue(s) {
+  return state.gate ? '*'.repeat([...s].length) : s;
+}
 
 function paintSearch() {
   const value = el.keeper.value;
-  el.shown.textContent = PROMPT + value;
+  el.shown.textContent = prompt_() + shownValue(value);
 
   // 커서는 입력 지점 위에 놓는다. IME 조합 중에도 selectionStart가 따라온다.
   const at = el.keeper.selectionStart ?? value.length;
-  const col = width(PROMPT) + width(value.slice(0, at));
+  const col = width(prompt_()) + width(shownValue(value.slice(0, at)));
   el.cursor.style.left = `${col}ch`;
 
   el.cursor.classList.toggle('hidden', !state.insert);
   el.cursor.classList.toggle('blink', state.insert);
+}
+
+/* ── 비밀번호 ──────────────────────────────────────── */
+
+/** 게이트로 들어간다. 목록을 지우고 비밀번호를 묻는다. */
+function showGate(note) {
+  state.gate = true;
+  state.rows = [];
+  state.hits = [];
+  state.drives = [];
+  state.browse = null;
+  state.origin = null;
+  document.body.classList.add('gate');
+  el.keeper.value = '';
+  el.where.textContent = note || '';
+  setInsert(true);
+  paintSearch();
+}
+
+/** 게이트를 나간다. */
+function leaveGate() {
+  state.gate = false;
+  document.body.classList.remove('gate');
+  el.keeper.value = '';
+  el.where.textContent = '';
+  paintSearch();
+  loadDrives();
+}
+
+async function tryLogin() {
+  const password = el.keeper.value;
+  if (!password) return;
+  el.where.textContent = '확인하는 중...';
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
+    if (r.ok) { leaveGate(); return; }
+    const data = await r.json().catch(() => ({}));
+    el.keeper.value = '';
+    paintSearch();
+    if (r.status === 429) {
+      el.where.textContent = `너무 여러 번 틀렸습니다. ${data.seconds || 60}초 뒤에 다시 시도하세요.`;
+    } else {
+      el.where.textContent = 'WRONG PASSWORD';
+    }
+  } catch (e) {
+    el.where.textContent = '연결할 수 없습니다: ' + e.message;
+  }
 }
 
 /* ── 표 그리기 ─────────────────────────────────────── */
@@ -454,10 +526,19 @@ function page() {
 
 /* ── 데이터 ────────────────────────────────────────── */
 
+/** 인덱스를 읽는 요청. 세션이 끊겼으면 게이트로 돌려보낸다. */
+async function api(url) {
+  const r = await fetch(url);
+  if (r.status === 401) {
+    showGate('세션이 끝났습니다. 다시 로그인하세요.');
+    throw new Error('로그인이 필요합니다');
+  }
+  return r.json();
+}
+
 async function loadDrives() {
   try {
-    const r = await fetch('/api/drives');
-    const data = await r.json();
+    const data = await api('/api/drives');
     if (data.error) throw new Error(data.error);
     state.drives = data.drives;
     // 목록을 불러오는 동안 사용자가 이미 검색어를 쳤을 수 있다.
@@ -469,6 +550,7 @@ async function loadDrives() {
       state.note = state.drives.length ? '' : '인덱싱된 하드가 없습니다.';
     }
   } catch (e) {
+    if (state.gate) return;
     state.note = '인덱스를 읽을 수 없습니다: ' + e.message;
     state.rows = [];
   }
@@ -494,8 +576,7 @@ async function runSearch(q) {
   }
 
   try {
-    const r = await fetch('/api/search?q=' + encodeURIComponent(q));
-    const data = await r.json();
+    const data = await api('/api/search?q=' + encodeURIComponent(q));
     if (seq !== searchSeq) return;   // 더 최근 검색이 이미 떠났다
     if (data.error) throw new Error(data.error);
 
@@ -508,6 +589,7 @@ async function runSearch(q) {
     state.sel = 0;
     state.note = state.hits.length ? '' : '찾은 것이 없습니다.';
   } catch (e) {
+    if (state.gate) return;
     if (seq !== searchSeq) return;
     state.rows = [];
     state.note = '검색에 실패했습니다: ' + e.message;
@@ -521,8 +603,7 @@ async function runSearch(q) {
 async function openDir(serial, label, dir, from) {
   try {
     const q = `serial=${encodeURIComponent(serial)}&dir=${encodeURIComponent(dir)}`;
-    const r = await fetch('/api/list?' + q);
-    const data = await r.json();
+    const data = await api('/api/list?' + q);
     if (data.error) throw new Error(data.error);
 
     if (from) state.origin = from;   // 여기서 나가면 검색 결과로 되돌아간다
@@ -534,6 +615,7 @@ async function openDir(serial, label, dir, from) {
     state.sel = 0;
     state.note = '';
   } catch (e) {
+    if (state.gate) return;
     state.rows = [];
     state.note = '폴더를 열 수 없습니다: ' + e.message;
   }
@@ -581,6 +663,7 @@ function showDrives() {
 
 /** 지금 줄을 연다. 하드면 그 루트를, 폴더면 그 안을 펼친다. */
 function enter() {
+  if (state.gate) { tryLogin(); return; }
   const row = state.rows[state.sel];
   if (!row) return;
   if (state.kind === 'drive') return openDir(row.serial, row.label, '');
@@ -594,6 +677,7 @@ function enter() {
 
 function onInput() {
   paintSearch();
+  if (state.gate) return;      // 비밀번호를 치는 중이다. 검색하지 않는다.
   clearTimeout(searchTimer);
   const q = el.keeper.value;
   searchTimer = setTimeout(() => runSearch(q), 140);
@@ -647,6 +731,7 @@ document.addEventListener('keydown', e => {
     case 'Escape':
       // ESC는 VIM 모드를 켜면서 NORMAL로 들어간다. 마우스 없이도
       // hjkl을 쓸 수 있어야 하므로 켜져 있는지 따지지 않는다.
+      if (state.gate) return;      // 게이트에서는 모드를 바꾸지 않는다
       e.preventDefault();
       state.vim = true;
       setInsert(false);
@@ -679,11 +764,29 @@ document.addEventListener('mousedown', () => { if (state.insert) el.keeper.focus
 
 window.addEventListener('resize', () => { fitList(); paintMore(); });
 
+/** 세션이 있으면 목록을, 없으면 게이트를 띄운다. */
+async function boot() {
+  try {
+    const r = await fetch('/api/drives');
+    if (r.status === 401) { showGate(); return; }
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    state.drives = data.drives;
+    state.kind = 'drive';
+    state.rows = state.drives;
+    state.note = state.drives.length ? '' : '인덱싱된 하드가 없습니다.';
+  } catch (e) {
+    state.note = '인덱스를 읽을 수 없습니다: ' + e.message;
+    state.rows = [];
+  }
+  paintAll();
+}
+
 tick();
 setInterval(tick, 1000);
 fitList();
 paintAll();
-loadDrives();
+boot();
 el.keeper.focus();
 </script>
 </body>
