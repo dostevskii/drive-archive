@@ -8,7 +8,8 @@ use std::path::Path;
 use std::process::Command;
 
 /// 작업 스케줄러에 등록되는 이름.
-pub const TASK_NAME: &str = "drive-archive sync";
+pub const SYNC_TASK: &str = "drive-archive sync";
+pub const SERVE_TASK: &str = "drive-archive serve";
 
 /// 볼륨이 마운트될 때 Windows가 System 로그에 남기는 이벤트.
 ///
@@ -41,7 +42,7 @@ fn task_xml(exe: &Path) -> Result<String> {
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>외장하드가 연결되면 drive-archive 인덱스를 갱신합니다. 평소에는 실행되지 않습니다.</Description>
-    <URI>\{TASK_NAME}</URI>
+    <URI>\{SYNC_TASK}</URI>
   </RegistrationInfo>
   <Triggers>
     <EventTrigger>
@@ -94,6 +95,67 @@ fn task_xml(exe: &Path) -> Result<String> {
     ))
 }
 
+/// 웹 화면을 로그온할 때 띄우는 작업.
+///
+/// sync 작업과 세 곳이 다르다. 트리거는 로그온뿐이고(하드를 꽂았다고 서버를 다시
+/// 띄울 이유가 없다), 인자는 `serve --no-open`이며(로그온마다 브라우저가 뜨면 안
+/// 된다), `ExecutionTimeLimit`이 `PT0S`다 — sync의 `PT4H`를 그대로 쓰면 서버가
+/// 네 시간 뒤에 죽는다.
+fn serve_task_xml(exe: &Path) -> Result<String> {
+    let user = std::env::var("USERNAME").context("USERNAME 환경 변수를 읽을 수 없습니다")?;
+    let domain = std::env::var("USERDOMAIN").unwrap_or_else(|_| ".".to_string());
+    let exe = exe.display().to_string();
+
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>drive-archive 웹 화면을 띄웁니다. 컴퓨터가 켜져 있는 동안에만 접속할 수 있습니다.</Description>
+    <URI>\{SERVE_TASK}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <Delay>PT30S</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{domain}\{user}</UserId>
+      <LogonType>S4U</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>false</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>true</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{exe}</Command>
+      <Arguments>serve --no-open</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#
+    ))
+}
+
 /// `schtasks.exe`는 UTF-16LE로 인코딩된 XML만 받는다.
 fn to_utf16le_bom(s: &str) -> Vec<u8> {
     let mut bytes = vec![0xFF, 0xFE];
@@ -108,25 +170,14 @@ pub fn current_exe() -> Result<std::path::PathBuf> {
     std::env::current_exe().context("실행 파일 경로를 알 수 없습니다")
 }
 
-/// 작업을 등록한다. 이미 있으면 새 정의로 덮어쓴다.
-///
-/// 작업 스케줄러에 쓰려면 관리자 권한이 필요하다. 권한이 없으면
-/// schtasks가 영문 오류만 내놓으므로, 미리 확인해 무엇을 해야 하는지 알려 준다.
-pub fn setup(exe: &Path) -> Result<()> {
-    if !crate::elevation::is_elevated() {
-        bail!(
-            "작업 스케줄러에 등록하려면 관리자 권한이 필요합니다.\n\
-             PowerShell을 마우스 오른쪽 버튼으로 눌러 '관리자 권한으로 실행'한 뒤 다시 시도하세요."
-        );
-    }
-
-    let xml = task_xml(exe)?;
-    let tmp = std::env::temp_dir().join("drive-archive-task.xml");
-    std::fs::write(&tmp, to_utf16le_bom(&xml))
+/// 작업 하나를 등록한다. 이미 있으면 새 정의로 덮어쓴다.
+fn register(name: &str, xml: &str) -> Result<()> {
+    let tmp = std::env::temp_dir().join(format!("{}.xml", name.replace(' ', "-")));
+    std::fs::write(&tmp, to_utf16le_bom(xml))
         .with_context(|| format!("작업 정의를 쓸 수 없습니다: {}", tmp.display()))?;
 
     let out = Command::new("schtasks")
-        .args(["/Create", "/TN", TASK_NAME, "/XML"])
+        .args(["/Create", "/TN", name, "/XML"])
         .arg(&tmp)
         .arg("/F")
         .output()
@@ -135,8 +186,60 @@ pub fn setup(exe: &Path) -> Result<()> {
     let _ = std::fs::remove_file(&tmp);
 
     if !out.status.success() {
-        bail!("작업 스케줄러 등록에 실패했습니다:\n{}", decode_console(&out.stderr, &out.stdout));
+        bail!(
+            "{name} 등록에 실패했습니다:\n{}",
+            decode_console(&out.stderr, &out.stdout)
+        );
     }
+    Ok(())
+}
+
+fn delete(name: &str) -> Result<bool> {
+    if !exists_named(name) {
+        return Ok(false);
+    }
+    let out = Command::new("schtasks")
+        .args(["/Delete", "/TN", name, "/F"])
+        .output()
+        .context("schtasks를 실행할 수 없습니다")?;
+    if !out.status.success() {
+        bail!(
+            "{name} 삭제에 실패했습니다:\n{}",
+            decode_console(&out.stderr, &out.stdout)
+        );
+    }
+    Ok(true)
+}
+
+fn exists_named(name: &str) -> bool {
+    Command::new("schtasks")
+        .args(["/Query", "/TN", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn run_named(name: &str) -> Result<()> {
+    let out = Command::new("schtasks")
+        .args(["/Run", "/TN", name])
+        .output()
+        .context("schtasks를 실행할 수 없습니다")?;
+    if !out.status.success() {
+        bail!("{name} 작업을 시작하지 못했습니다:\n{}", decode_console(&out.stderr, &out.stdout));
+    }
+    Ok(())
+}
+
+/// 자동 인덱싱과 웹 화면 작업을 함께 등록한다.
+pub fn setup(exe: &Path) -> Result<()> {
+    if !crate::elevation::is_elevated() {
+        bail!(
+            "작업 스케줄러에 등록하려면 관리자 권한이 필요합니다.\n\
+             PowerShell을 마우스 오른쪽 버튼으로 눌러 '관리자 권한으로 실행'한 뒤 다시 시도하세요."
+        );
+    }
+    register(SYNC_TASK, &task_xml(exe)?)?;
+    register(SERVE_TASK, &serve_task_xml(exe)?)?;
     Ok(())
 }
 
@@ -149,20 +252,17 @@ pub fn setup(exe: &Path) -> Result<()> {
 /// 작업은 `LeastPrivilege`로 등록되어 있어, 상승된 권한에서 호출해도 스캔 자체는
 /// 일반 사용자 권한으로 돈다. 실행에는 관리자 권한이 필요 없다.
 pub fn run_now() -> Result<()> {
-    let out = Command::new("schtasks")
-        .args(["/Run", "/TN", TASK_NAME])
-        .output()
-        .context("schtasks를 실행할 수 없습니다")?;
-
-    if !out.status.success() {
-        bail!("작업을 시작하지 못했습니다:\n{}", decode_console(&out.stderr, &out.stdout));
-    }
-    Ok(())
+    run_named(SYNC_TASK)
 }
 
-/// 등록된 작업을 제거한다. 없으면 조용히 넘어간다.
+/// 등록 직후 웹 화면을 바로 띄울 때 쓴다. 다음 로그온을 기다리게 하지 않는다.
+pub fn run_serve_now() -> Result<()> {
+    run_named(SERVE_TASK)
+}
+
+/// 등록한 작업을 모두 제거한다. 하나라도 지웠으면 참이다.
 pub fn remove() -> Result<bool> {
-    if !exists() {
+    if !exists_named(SYNC_TASK) && !exists_named(SERVE_TASK) {
         return Ok(false);
     }
     if !crate::elevation::is_elevated() {
@@ -171,24 +271,14 @@ pub fn remove() -> Result<bool> {
              PowerShell을 '관리자 권한으로 실행'한 뒤 다시 시도하세요."
         );
     }
-    let out = Command::new("schtasks")
-        .args(["/Delete", "/TN", TASK_NAME, "/F"])
-        .output()
-        .context("schtasks를 실행할 수 없습니다")?;
-
-    if !out.status.success() {
-        bail!("작업 삭제에 실패했습니다:\n{}", decode_console(&out.stderr, &out.stdout));
-    }
-    Ok(true)
+    let a = delete(SYNC_TASK)?;
+    let b = delete(SERVE_TASK)?;
+    Ok(a || b)
 }
 
 /// 작업이 등록되어 있는지 확인한다.
 pub fn exists() -> bool {
-    Command::new("schtasks")
-        .args(["/Query", "/TN", TASK_NAME])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    exists_named(SYNC_TASK)
 }
 
 /// 콘솔 출력은 UTF-8이 아닐 수 있다. 깨지더라도 원인은 읽히도록 한다.
@@ -253,5 +343,51 @@ mod tests {
         let bytes = to_utf16le_bom("한");
         // U+D55C -> LE 바이트 순서는 5C D5
         assert_eq!(bytes, vec![0xFF, 0xFE, 0x5C, 0xD5]);
+    }
+
+    #[test]
+    fn serve_작업은_로그온에_뜨고_시간_제한이_없다() {
+        let xml = serve_task_xml(Path::new(r"C:\bin\drive-archive.exe")).unwrap();
+        assert!(xml.contains("<LogonTrigger>"));
+        // sync의 PT4H를 그대로 쓰면 서버가 4시간 뒤에 죽는다.
+        assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"), "{xml}");
+        assert!(!xml.contains("PT4H"));
+    }
+
+    #[test]
+    fn serve_작업은_마운트_이벤트를_듣지_않는다() {
+        // 하드를 꽂았다고 웹 서버를 다시 띄울 이유가 없다.
+        let xml = serve_task_xml(Path::new(r"C:\bin\drive-archive.exe")).unwrap();
+        assert!(!xml.contains("EventTrigger"));
+    }
+
+    #[test]
+    fn serve_작업은_창_없이_실행된다() {
+        let xml = serve_task_xml(Path::new(r"C:\bin\drive-archive.exe")).unwrap();
+        assert!(xml.contains("<LogonType>S4U</LogonType>"));
+        assert!(xml.contains("<Hidden>true</Hidden>"));
+    }
+
+    #[test]
+    fn serve_작업은_브라우저를_열지_않는다() {
+        // 로그온할 때마다 브라우저가 뜨면 안 된다.
+        let xml = serve_task_xml(Path::new(r"C:\bin\drive-archive.exe")).unwrap();
+        assert!(xml.contains("<Arguments>serve --no-open</Arguments>"), "{xml}");
+    }
+
+    #[test]
+    fn 두_작업의_이름이_다르다() {
+        assert_ne!(SYNC_TASK, SERVE_TASK);
+        let sync = task_xml(Path::new(r"C:\bin\drive-archive.exe")).unwrap();
+        let serve = serve_task_xml(Path::new(r"C:\bin\drive-archive.exe")).unwrap();
+        assert!(sync.contains(&format!("<URI>\\{SYNC_TASK}</URI>")));
+        assert!(serve.contains(&format!("<URI>\\{SERVE_TASK}</URI>")));
+    }
+
+    #[test]
+    fn serve_작업도_한_번만_돈다() {
+        // 두 개가 뜨면 뒤엣것이 포트를 못 잡는다.
+        let xml = serve_task_xml(Path::new(r"C:\bin\drive-archive.exe")).unwrap();
+        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
     }
 }
