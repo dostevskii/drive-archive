@@ -1,2 +1,0 @@
-[     990ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:8788/api/drives:0
-[    1019ms] [ERROR] Failed to load resource: the server responded with a status of 401 (Unauthorized) @ http://127.0.0.1:8788/favicon.ico:0
