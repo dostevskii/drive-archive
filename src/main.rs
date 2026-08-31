@@ -102,6 +102,9 @@ enum Cmd {
         no_open: bool,
     },
 
+    /// 웹 화면 비밀번호를 설정하거나 바꿉니다
+    Passwd,
+
     /// 외장하드 연결 시 자동 인덱싱하도록 작업 스케줄러에 등록합니다
     SetupTask,
 
@@ -130,6 +133,7 @@ fn run() -> Result<()> {
         Cmd::Uninstall => install::uninstall(),
         Cmd::Mcp => mcp::serve(),
         Cmd::Serve { port, no_open } => serve::serve(port, !no_open),
+        Cmd::Passwd => cmd_passwd(),
         Cmd::SetupTask => cmd_setup_task(),
         Cmd::RemoveTask => cmd_remove_task(),
     }
@@ -405,6 +409,76 @@ fn cmd_remove_task() -> Result<()> {
     Ok(())
 }
 
+/// 새 비밀번호로 쓸 수 있는지 본다. 통과하면 그 값을 돌려준다.
+///
+/// 앞뒤 공백을 지우지 않는 것은 사용자가 일부러 넣었을 수 있어서다. 다만 공백만
+/// 있는 것은 실수로 본다.
+fn check_new_password(first: &str, second: &str) -> Result<String> {
+    if first != second {
+        anyhow::bail!("두 번 입력한 값이 다릅니다.");
+    }
+    if first.trim().is_empty() {
+        anyhow::bail!("비밀번호가 비어 있습니다.");
+    }
+    if first.chars().count() < 8 {
+        anyhow::bail!("비밀번호는 8자 이상이어야 합니다. 밖에서 접속할 수 있는 화면입니다.");
+    }
+    Ok(first.to_string())
+}
+
+/// 화면에 찍히지 않게 한 줄을 받는다.
+///
+/// 별표도 찍지 않는다. 터미널에서는 그것이 관례이고, 길이가 어깨너머로 새지 않는다.
+/// 파이프로 넘어온 입력에는 콘솔 모드가 없으므로 그때는 그냥 읽는다.
+fn read_hidden(prompt: &str) -> Result<String> {
+    use std::io::{BufRead, Write};
+    use windows::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE, ENABLE_ECHO_INPUT,
+        STD_INPUT_HANDLE,
+    };
+
+    print!("{prompt}");
+    std::io::stdout().flush().ok();
+
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.context("표준 입력을 열 수 없습니다")?;
+    let mut mode = CONSOLE_MODE::default();
+    let is_console = unsafe { GetConsoleMode(handle, &mut mode) }.is_ok();
+    if is_console {
+        let _ = unsafe { SetConsoleMode(handle, mode & !ENABLE_ECHO_INPUT) };
+    }
+
+    let mut line = String::new();
+    let read = std::io::stdin().lock().read_line(&mut line);
+
+    if is_console {
+        let _ = unsafe { SetConsoleMode(handle, mode) };
+        println!();   // 사용자가 누른 Enter가 화면에 남지 않았으므로 줄을 바꿔 준다
+    }
+    read.context("입력을 읽을 수 없습니다")?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// 새 비밀번호를 두 번 받아 저장한다. `install`도 이 함수를 쓴다.
+fn prompt_and_set_password() -> Result<()> {
+    let first = read_hidden("새 비밀번호 (8자 이상): ")?;
+    let second = read_hidden("한 번 더: ")?;
+    let password = check_new_password(&first, &second)?;
+    auth::set_password(&password)?;
+    Ok(())
+}
+
+fn cmd_passwd() -> Result<()> {
+    if auth::is_configured() {
+        println!("이미 설정된 비밀번호를 새 것으로 바꿉니다.");
+    } else {
+        println!("웹 화면에서 쓸 비밀번호를 설정합니다.");
+    }
+    prompt_and_set_password()?;
+    println!("비밀번호를 저장했습니다.");
+    println!("이미 열려 있는 웹 세션은 그대로 살아 있습니다. 모두 끊으려면 서버를 다시 시작하세요.");
+    Ok(())
+}
+
 // ---------------------------------------------------------------- 출력 보조
 
 /// 바이트 수를 사람이 읽는 단위로 바꾼다.
@@ -541,5 +615,30 @@ mod tests {
 
         assert_eq!(needed, ["Works E"]);
         assert_eq!(ready, ["Works D (L:)"]);
+    }
+
+    #[test]
+    fn 빈_비밀번호는_거부한다() {
+        assert!(check_new_password("", "").is_err());
+        assert!(check_new_password("        ", "        ").is_err());
+    }
+
+    #[test]
+    fn 두_입력이_다르면_거부한다() {
+        assert!(check_new_password("충분히긴비밀번호", "충분히긴비밀번호다").is_err());
+    }
+
+    #[test]
+    fn 너무_짧으면_거부한다() {
+        // 밖에 열리는 화면이다. 네 글자짜리는 찍어서 뚫린다.
+        assert!(check_new_password("1234", "1234").is_err());
+        assert!(check_new_password("일곱글자짜리요", "일곱글자짜리요").is_err());
+    }
+
+    #[test]
+    fn 쓸_만한_비밀번호는_통과한다() {
+        assert!(check_new_password("충분히긴비밀번호", "충분히긴비밀번호").is_ok());
+        // 앞뒤 공백은 사용자가 의도한 것일 수 있으므로 지우지 않는다.
+        assert_eq!(check_new_password(" abcdefgh", " abcdefgh").unwrap(), " abcdefgh");
     }
 }
