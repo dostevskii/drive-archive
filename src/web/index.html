@@ -45,6 +45,10 @@
     flex-direction: column;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
+    /* 휴대폰 브라우저가 글자를 임의로 부풀리지 않게 한다. 첫 진입 때 화면이
+       확대되어 보이던 관찰의 예방책이다 — 크기는 위 font-size 계산만이 정한다. */
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
     --line: 1.1667em;   /* 21px / 18px. 글자 크기가 줄면 줄 높이도 따라 준다 */
   }
 
