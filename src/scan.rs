@@ -59,7 +59,7 @@ pub fn scan_root(root: &str) -> Result<ScanResult> {
     // 루트를 못 읽으면 순회는 빈 결과를 정상인 것처럼 돌려준다. 그 결과를 인덱스에
     // 반영하면 멀쩡한 항목이 전부 "삭제됨"으로 처리된다. 여기서 실패로 끊는다.
     std::fs::read_dir(&root_path).with_context(|| {
-        format!("{root} 을(를) 읽을 수 없습니다. 하드가 분리되었을 수 있습니다.")
+        format!("Could not read {root}. The drive may have been disconnected.")
     })?;
 
     let mut entries = Vec::new();
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn 읽을_수_없는_루트는_빈_결과가_아니라_실패다() {
         let err = scan_root("Z:\\없는드라이브").unwrap_err();
-        assert!(format!("{err:#}").contains("읽을 수 없습니다"));
+        assert!(format!("{err:#}").contains("Could not read"));
     }
 
     #[test]

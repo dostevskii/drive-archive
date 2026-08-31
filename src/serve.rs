@@ -71,7 +71,7 @@ fn session_cookie(token: &str, https: bool) -> String {
 /// 같은 내부 사정이 들어 있어, 그대로 내보내면 익명 호출자에게 새어 나간다.
 /// 상세는 stderr로 보내고(직접 띄웠을 때 보인다) 밖으로는 일반 문구만 준다.
 fn internal_error(e: &anyhow::Error) -> (u16, String, Option<String>) {
-    eprintln!("로그인 처리 실패: {e:#}");
+    eprintln!("Login handling failed: {e:#}");
     (500, serde_json::json!({ "error": "internal" }).to_string(), None)
 }
 
@@ -119,14 +119,14 @@ pub fn serve(port: u16, open_browser: bool) -> Result<()> {
         // 왜 죽었는지를 로그에 남겨야 사람이 알 수 있다.
         crate::sync::log("serve: 비밀번호가 설정되어 있지 않아 뜨지 않음");
         anyhow::bail!(
-            "웹 화면 비밀번호가 설정되어 있지 않습니다.\n\
-             `drive-archive passwd`로 먼저 설정하세요."
+            "No web page password is set.\n\
+             Set one first with `drive-archive passwd`."
         );
     }
 
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| {
         crate::sync::log(&format!("serve: {port}번 포트를 열지 못함 ({e})"));
-        anyhow::anyhow!("{port}번 포트를 열 수 없습니다 (이미 쓰고 있는지 확인하세요): {e}")
+        anyhow::anyhow!("Could not open port {port} (check whether it's already in use): {e}")
     })?;
 
     let state = Arc::new(ServeState {
@@ -136,9 +136,9 @@ pub fn serve(port: u16, open_browser: bool) -> Result<()> {
     });
 
     let url = format!("http://127.0.0.1:{port}/");
-    println!("drive-archive 웹 화면: {url}");
-    println!("밖에서 보시려면 이 주소로 터널을 붙이세요.");
-    println!("끝내려면 Ctrl+C를 누르세요.");
+    println!("drive-archive web page: {url}");
+    println!("To view it from outside, set up a tunnel to this address.");
+    println!("Press Ctrl+C to stop.");
 
     if open_browser {
         let _ = std::process::Command::new("cmd")
@@ -151,7 +151,7 @@ pub fn serve(port: u16, open_browser: bool) -> Result<()> {
         let st = Arc::clone(&state);
         std::thread::spawn(move || {
             if let Err(e) = handle(stream, &st) {
-                eprintln!("요청 처리 실패: {e:#}");
+                eprintln!("Request handling failed: {e:#}");
             }
         });
     }
@@ -395,7 +395,7 @@ fn api_list(query: &str) -> Result<String> {
     }
 
     if serial.is_empty() {
-        anyhow::bail!("어느 하드인지 지정되지 않았습니다");
+        anyhow::bail!("No drive was specified");
     }
 
     let conn = crate::db::open()?;

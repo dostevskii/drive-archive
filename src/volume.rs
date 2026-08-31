@@ -228,7 +228,7 @@ pub fn volume_at(letter: char) -> Result<Volume> {
         .into_iter()
         .find(|v| v.letter == letter)
         .with_context(|| {
-            format!("{letter}: 드라이브는 연결된 외장 볼륨이 아닙니다. `drive-archive drives`로 목록을 확인하세요.")
+            format!("Drive {letter}: is not a connected external volume. Run `drive-archive drives` to see the list.")
         })
 }
 

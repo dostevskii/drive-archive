@@ -11,11 +11,11 @@ drive-archive는 외장하드가 **연결될 때마다 자동으로** 그 안의
 ```
 $ drive-archive search "2024 브랜딩"
 
-  [PROJECT-A]  작업/2024/브랜딩_리뉴얼/          (폴더, 2024-11-03)
+  [PROJECT-A]  작업/2024/브랜딩_리뉴얼/          (folder, 2024-11-03)
   [PROJECT-A]  작업/2024/브랜딩_리뉴얼/최종.psd   (1.2 GB, 2024-11-03)
   [BACKUP-02]  보관/2024브랜딩_백업.zip          (3.4 GB, 2024-12-20)
 
-  → PROJECT-A 하드를 연결하세요.
+  → Connect these drives: PROJECT-A.
 ```
 
 ---
@@ -193,15 +193,15 @@ drive-archive drives
 등록된 모든 하드의 라벨, 파일 시스템 형식, 용량, 마지막 연결 시각, **지금 연결되어 있는지 여부**를 보여줍니다.
 
 ```
-PROJECT-A  [연결됨 (L:)]
-  항목 22661개 · NTFS · 용량 1.8 TB 중 302.3 GB 남음
-  마지막 연결 2026-08-26 13:17:44 · 마지막 스캔 2026-08-26 13:17:44
-  볼륨 시리얼 90FA8BC5
+PROJECT-A  [connected (L:)]
+  22661 items · NTFS · 1.8 TB total, 302.3 GB free
+  Last connected 2026-08-26 13:17:44 · Last scanned 2026-08-26 13:17:44
+  Volume serial 90FA8BC5
 
-BACKUP-02  [연결 안 됨]
-  항목 171139개 · exFAT · 용량 3.6 TB 중 577.6 GB 남음
-  마지막 연결 2026-08-26 13:06:49 · 마지막 스캔 2026-08-26 13:17:13
-  볼륨 시리얼 5C31A9F0
+BACKUP-02  [not connected]
+  171139 items · exFAT · 3.6 TB total, 577.6 GB free
+  Last connected 2026-08-26 13:06:49 · Last scanned 2026-08-26 13:17:13
+  Volume serial 5C31A9F0
 ```
 
 ### 그 외 명령

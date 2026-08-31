@@ -30,7 +30,7 @@ pub fn random_bytes(n: usize) -> Result<Vec<u8>> {
     let mut buf = vec![0u8; n];
     unsafe { BCryptGenRandom(None, &mut buf, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }
         .ok()
-        .context("난수를 얻지 못했습니다")?;
+        .context("Could not obtain random bytes")?;
     Ok(buf)
 }
 
@@ -41,19 +41,19 @@ fn auth_path(dir: &Path) -> PathBuf {
 /// 비밀번호를 argon2id로 해시해 저장한다. 이미 있으면 덮어쓴다.
 pub fn set_password_at(dir: &Path, password: &str) -> Result<()> {
     std::fs::create_dir_all(dir)
-        .with_context(|| format!("폴더를 만들 수 없습니다: {}", dir.display()))?;
+        .with_context(|| format!("Could not create folder: {}", dir.display()))?;
 
     let salt_bytes = random_bytes(16)?;
     let salt = SaltString::encode_b64(&salt_bytes)
-        .map_err(|e| anyhow::anyhow!("salt를 만들 수 없습니다: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Could not create salt: {e}"))?;
     let hash = Argon2::default()
         .hash_password(password.as_bytes(), &salt)
-        .map_err(|e| anyhow::anyhow!("비밀번호를 해시하지 못했습니다: {e}"))?
+        .map_err(|e| anyhow::anyhow!("Could not hash password: {e}"))?
         .to_string();
 
     let body = serde_json::json!({ "hash": hash }).to_string();
     std::fs::write(auth_path(dir), body)
-        .with_context(|| format!("비밀번호를 저장할 수 없습니다: {}", dir.display()))?;
+        .with_context(|| format!("Could not save password: {}", dir.display()))?;
     Ok(())
 }
 
@@ -63,12 +63,12 @@ pub fn verify_at(dir: &Path, password: &str) -> Result<bool> {
         return Ok(false);
     };
     let stored: serde_json::Value =
-        serde_json::from_str(&body).context("auth.json을 읽을 수 없습니다")?;
+        serde_json::from_str(&body).context("Could not read auth.json")?;
     let Some(hash) = stored.get("hash").and_then(|h| h.as_str()) else {
         return Ok(false);
     };
     let parsed = PasswordHash::new(hash)
-        .map_err(|e| anyhow::anyhow!("저장된 해시가 깨졌습니다: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Stored hash is corrupted: {e}"))?;
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())

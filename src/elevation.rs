@@ -72,7 +72,7 @@ pub fn relaunch_as_admin(args: &[&str]) -> Result<()> {
 
     // ShellExecuteW는 성공하면 32보다 큰 값을 돌려준다. 오래된 API의 관례다.
     if result.0 as usize <= 32 {
-        bail!("관리자 권한으로 다시 실행하지 못했습니다. UAC 창에서 취소했을 수 있습니다.");
+        bail!("Could not relaunch with administrator privileges. The UAC prompt may have been canceled.");
     }
     Ok(())
 }

@@ -33,7 +33,7 @@ const MOUNT_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Pat
 /// `schtasks /Run`처럼 값이 없는 경로로 실행되면 치환되지 않은 문자열이 그대로 넘어오는데,
 /// `sync` 쪽에서 드라이브 문자로 읽히지 않는 값은 무시하고 연결된 하드를 전부 확인한다.
 fn task_xml(exe: &Path) -> Result<String> {
-    let user = std::env::var("USERNAME").context("USERNAME 환경 변수를 읽을 수 없습니다")?;
+    let user = std::env::var("USERNAME").context("Could not read the USERNAME environment variable")?;
     let domain = std::env::var("USERDOMAIN").unwrap_or_else(|_| ".".to_string());
     let exe = exe.display().to_string();
 
@@ -102,7 +102,7 @@ fn task_xml(exe: &Path) -> Result<String> {
 /// 된다), `ExecutionTimeLimit`이 `PT0S`다 — sync의 `PT4H`를 그대로 쓰면 서버가
 /// 네 시간 뒤에 죽는다.
 fn serve_task_xml(exe: &Path) -> Result<String> {
-    let user = std::env::var("USERNAME").context("USERNAME 환경 변수를 읽을 수 없습니다")?;
+    let user = std::env::var("USERNAME").context("Could not read the USERNAME environment variable")?;
     let domain = std::env::var("USERDOMAIN").unwrap_or_else(|_| ".".to_string());
     let exe = exe.display().to_string();
 
@@ -167,27 +167,27 @@ fn to_utf16le_bom(s: &str) -> Vec<u8> {
 
 /// 지금 실행 중인 실행 파일의 절대 경로.
 pub fn current_exe() -> Result<std::path::PathBuf> {
-    std::env::current_exe().context("실행 파일 경로를 알 수 없습니다")
+    std::env::current_exe().context("Could not determine the executable's path")
 }
 
 /// 작업 하나를 등록한다. 이미 있으면 새 정의로 덮어쓴다.
 fn register(name: &str, xml: &str) -> Result<()> {
     let tmp = std::env::temp_dir().join(format!("{}.xml", name.replace(' ', "-")));
     std::fs::write(&tmp, to_utf16le_bom(xml))
-        .with_context(|| format!("작업 정의를 쓸 수 없습니다: {}", tmp.display()))?;
+        .with_context(|| format!("Could not write task definition: {}", tmp.display()))?;
 
     let out = Command::new("schtasks")
         .args(["/Create", "/TN", name, "/XML"])
         .arg(&tmp)
         .arg("/F")
         .output()
-        .context("schtasks를 실행할 수 없습니다")?;
+        .context("Could not run schtasks")?;
 
     let _ = std::fs::remove_file(&tmp);
 
     if !out.status.success() {
         bail!(
-            "{name} 등록에 실패했습니다:\n{}",
+            "Failed to register {name}:\n{}",
             decode_console(&out.stderr, &out.stdout)
         );
     }
@@ -201,10 +201,10 @@ fn delete(name: &str) -> Result<bool> {
     let out = Command::new("schtasks")
         .args(["/Delete", "/TN", name, "/F"])
         .output()
-        .context("schtasks를 실행할 수 없습니다")?;
+        .context("Could not run schtasks")?;
     if !out.status.success() {
         bail!(
-            "{name} 삭제에 실패했습니다:\n{}",
+            "Failed to delete {name}:\n{}",
             decode_console(&out.stderr, &out.stdout)
         );
     }
@@ -223,9 +223,9 @@ fn run_named(name: &str) -> Result<()> {
     let out = Command::new("schtasks")
         .args(["/Run", "/TN", name])
         .output()
-        .context("schtasks를 실행할 수 없습니다")?;
+        .context("Could not run schtasks")?;
     if !out.status.success() {
-        bail!("{name} 작업을 시작하지 못했습니다:\n{}", decode_console(&out.stderr, &out.stdout));
+        bail!("Could not start {name} task:\n{}", decode_console(&out.stderr, &out.stdout));
     }
     Ok(())
 }
@@ -234,8 +234,8 @@ fn run_named(name: &str) -> Result<()> {
 pub fn setup(exe: &Path) -> Result<()> {
     if !crate::elevation::is_elevated() {
         bail!(
-            "작업 스케줄러에 등록하려면 관리자 권한이 필요합니다.\n\
-             PowerShell을 마우스 오른쪽 버튼으로 눌러 '관리자 권한으로 실행'한 뒤 다시 시도하세요."
+            "Administrator privileges are required to register with Task Scheduler.\n\
+             Right-click PowerShell and choose 'Run as administrator', then try again."
         );
     }
     register(SYNC_TASK, &task_xml(exe)?)?;
@@ -267,8 +267,8 @@ pub fn remove() -> Result<bool> {
     }
     if !crate::elevation::is_elevated() {
         bail!(
-            "작업 스케줄러 등록을 해제하려면 관리자 권한이 필요합니다.\n\
-             PowerShell을 '관리자 권한으로 실행'한 뒤 다시 시도하세요."
+            "Administrator privileges are required to remove the Task Scheduler registration.\n\
+             Run PowerShell 'as administrator', then try again."
         );
     }
     let a = delete(SYNC_TASK)?;

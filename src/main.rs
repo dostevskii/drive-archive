@@ -21,7 +21,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "drive-archive",
     version,
-    about = "외장하드 자료를 인덱싱하고, 하드를 연결하지 않아도 검색할 수 있게 해줍니다",
+    about = "Indexes files on external hard drives so you can find them without connecting the drive",
     long_about = None
 )]
 struct Cli {
@@ -31,90 +31,90 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 연결된 외장하드를 확인해 인덱스를 갱신합니다 (작업 스케줄러가 자동 호출)
+    /// Checks connected external drives and updates the index (called automatically by Task Scheduler)
     Sync {
-        /// 방금 스캔한 하드도 다시 훑습니다
+        /// Rescan drives even if just scanned
         #[arg(long)]
         force: bool,
-        /// 이 드라이브만 확인합니다 (예: L:). 생략하면 연결된 하드를 모두 확인합니다
+        /// Check only this drive (e.g. L:). If omitted, checks all connected drives
         #[arg(long)]
         drive: Option<String>,
     },
 
-    /// 하드 하나를 수동으로 전체 재스캔합니다
+    /// Manually does a full rescan of one drive
     Scan {
-        /// 드라이브 문자 (예: E). 생략하면 연결된 하드를 모두 스캔합니다
+        /// Drive letter (e.g. E). If omitted, scans all connected drives
         drive: Option<String>,
     },
 
-    /// 파일과 폴더를 이름으로 검색해, 어느 하드에 있는지 보여줍니다
+    /// Searches files and folders by name and shows which drive they're on
     Search {
-        /// 찾을 이름의 일부
+        /// Part of the name to search for
         keyword: String,
-        /// 특정 하드 안에서만 검색 (라벨 또는 볼륨 시리얼)
+        /// Search within one drive only (label or volume serial)
         #[arg(long)]
         drive: Option<String>,
-        /// 폴더만 검색 (프로젝트 단위로 찾을 때)
+        /// Search folders only (for finding a project as a whole)
         #[arg(long)]
         dirs_only: bool,
-        /// 결과 개수 제한
+        /// Limit the number of results
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        /// JSON으로 출력
+        /// Output as JSON
         #[arg(long)]
         json: bool,
     },
 
-    /// 인덱스에 등록된 하드 목록과 현재 연결 여부를 보여줍니다
+    /// Shows the drives registered in the index and whether each is currently connected
     Drives {
         #[arg(long)]
         json: bool,
     },
 
-    /// 인덱스 통계를 보여줍니다
+    /// Shows index statistics
     Status {
         #[arg(long)]
         json: bool,
     },
 
-    /// 더 이상 쓰지 않는 하드를 인덱스에서 제거합니다
+    /// Removes a drive you no longer use from the index
     Forget {
-        /// 하드 라벨 또는 볼륨 시리얼
+        /// Drive label or volume serial
         name: String,
     },
 
-    /// 자동 인덱싱과 Claude 연결을 한 번에 설정합니다 (처음 쓸 때 한 번)
+    /// Sets up automatic indexing and the Claude connection in one step (run once, the first time)
     Install,
 
-    /// 자동 인덱싱과 Claude 연결을 해제합니다 (인덱스는 남습니다)
+    /// Removes automatic indexing and the Claude connection (the index is kept)
     Uninstall,
 
-    /// MCP 서버를 실행합니다 (Claude가 자동으로 호출합니다)
+    /// Runs the MCP server (Claude calls this automatically)
     Mcp,
 
-    /// 브라우저로 인덱스를 볼 수 있게 로컬 웹 화면을 띄웁니다
+    /// Starts a local web page so you can browse the index in a browser
     Serve {
-        /// 열 포트
+        /// Port to listen on
         #[arg(long, default_value_t = 8787)]
         port: u16,
-        /// 브라우저를 자동으로 열지 않습니다
+        /// Don't open the browser automatically
         #[arg(long)]
         no_open: bool,
     },
 
-    /// 웹 화면 비밀번호를 설정하거나 바꿉니다
+    /// Sets or changes the web page password
     Passwd,
 
-    /// 자동 인덱싱과 웹 화면 작업을 작업 스케줄러에 등록합니다
+    /// Registers automatic indexing and the web page task in Task Scheduler
     SetupTask,
 
-    /// 작업 스케줄러 등록(자동 인덱싱·웹 화면)을 해제합니다
+    /// Removes the Task Scheduler registration (automatic indexing, web page)
     RemoveTask,
 }
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("오류: {e:#}");
+        eprintln!("Error: {e:#}");
         std::process::exit(1);
     }
 }
@@ -173,8 +173,8 @@ fn cmd_sync(force: bool, drive: Option<&str>) -> Result<()> {
     let outcomes = sync::sync_all(force, only)?;
     if outcomes.is_empty() {
         match only {
-            Some(letter) => println!("{letter}: 드라이브는 인덱싱 대상이 아닙니다."),
-            None => println!("연결된 외장하드가 없습니다."),
+            Some(letter) => println!("Drive {letter}: is not indexed."),
+            None => println!("No external drives connected."),
         }
         return Ok(());
     }
@@ -182,19 +182,19 @@ fn cmd_sync(force: bool, drive: Option<&str>) -> Result<()> {
     for o in &outcomes {
         match o {
             sync::SyncOutcome::Skipped { label, letter } => {
-                println!("{label} ({letter}:)  방금 스캔했으므로 건너뜀");
+                println!("{label} ({letter}:)  skipped, scanned moments ago");
             }
             sync::SyncOutcome::Updated { label, letter, stats } if stats.has_changes() => {
                 println!(
-                    "{label} ({letter}:)  추가 {} / 변경 {} / 삭제 {}",
+                    "{label} ({letter}:)  added {} / changed {} / removed {}",
                     stats.added, stats.updated, stats.removed
                 );
             }
             sync::SyncOutcome::Updated { label, letter, stats } => {
-                println!("{label} ({letter}:)  변경 없음 ({}개 항목)", stats.unchanged);
+                println!("{label} ({letter}:)  no changes ({} items)", stats.unchanged);
             }
             sync::SyncOutcome::Failed { label, letter, reason } => {
-                println!("{label} ({letter}:)  반영하지 않음 - {reason}");
+                println!("{label} ({letter}:)  not applied - {reason}");
             }
         }
     }
@@ -210,23 +210,23 @@ fn cmd_scan(drive: Option<String>) -> Result<()> {
                 .chars()
                 .next()
                 .filter(|c| c.is_ascii_alphabetic())
-                .context("드라이브 문자를 알파벳 한 글자로 지정하세요 (예: E)")?;
+                .context("Specify a single alphabetic drive letter (e.g. E)")?;
             vec![volume::volume_at(letter)?]
         }
         None => volume::list_external_volumes(),
     };
 
     if volumes.is_empty() {
-        println!("연결된 외장하드가 없습니다.");
+        println!("No external drives connected.");
         return Ok(());
     }
 
     let mut conn = db::open()?;
     for vol in &volumes {
-        println!("{} ({}:) 스캔 중...", vol.label, vol.letter);
+        println!("{} ({}:) scanning...", vol.label, vol.letter);
         let stats = sync::sync_volume(&mut conn, vol)?;
         println!(
-            "  추가 {} / 변경 {} / 삭제 {} / 그대로 {}",
+            "  added {} / changed {} / removed {} / unchanged {}",
             stats.added, stats.updated, stats.removed, stats.unchanged
         );
     }
@@ -273,11 +273,11 @@ fn cmd_search(
     }
 
     if hits.is_empty() {
-        println!("'{keyword}'에 해당하는 자료를 찾지 못했습니다.");
+        println!("No matches found for '{keyword}'.");
         let stats = db::stats(&conn)?;
         if stats.entry_count == 0 {
             println!(
-                "\n아직 인덱싱된 하드가 없습니다. 외장하드를 연결한 뒤 `drive-archive sync`를 실행하세요."
+                "\nNo drives have been indexed yet. Connect an external drive, then run `drive-archive sync`."
             );
         }
         return Ok(());
@@ -285,7 +285,7 @@ fn cmd_search(
 
     let label_width = hits.iter().map(|h| display_width(&h.drive_label)).max().unwrap_or(0);
     for h in &hits {
-        let kind = if h.is_dir { "폴더".to_string() } else { format_bytes(h.size) };
+        let kind = if h.is_dir { "folder".to_string() } else { format_bytes(h.size) };
         let date = h.modified.as_deref().unwrap_or("-");
         let pad = " ".repeat(label_width.saturating_sub(display_width(&h.drive_label)));
         let trailing = if h.is_dir { "\\" } else { "" };
@@ -297,14 +297,14 @@ fn cmd_search(
     let (needed, ready) = split_by_connection(&hits, &volume::list_external_volumes());
     println!();
     if !needed.is_empty() {
-        println!("→ {} 하드를 연결하세요.", needed.join(", "));
+        println!("→ Connect these drives: {}.", needed.join(", "));
     }
     if !ready.is_empty() {
-        println!("→ 지금 연결되어 있는 하드: {}", ready.join(", "));
+        println!("→ Already connected: {}", ready.join(", "));
     }
 
     if hits.len() == limit {
-        println!("  (결과가 {limit}개에서 잘렸습니다. --limit 으로 늘릴 수 있습니다.)");
+        println!("  (Results truncated at {limit}. Use --limit to see more.)");
     }
     Ok(())
 }
@@ -320,30 +320,30 @@ fn cmd_drives(json: bool) -> Result<()> {
 
     if drives.is_empty() {
         println!(
-            "아직 인덱싱된 하드가 없습니다. 외장하드를 연결한 뒤 `drive-archive sync`를 실행하세요."
+            "No drives have been indexed yet. Connect an external drive, then run `drive-archive sync`."
         );
         return Ok(());
     }
 
     for d in &drives {
         let state = match d.letter {
-            Some(l) => format!("연결됨 ({l}:)"),
-            None => "연결 안 됨".to_string(),
+            Some(l) => format!("connected ({l}:)"),
+            None => "not connected".to_string(),
         };
         println!("{}  [{}]", d.label, state);
         println!(
-            "  항목 {}개 · {} · 용량 {} 중 {} 남음",
+            "  {} items · {} · {} total, {} free",
             d.entry_count,
             d.filesystem,
             format_bytes(d.total_bytes),
             format_bytes(d.free_bytes)
         );
         println!(
-            "  마지막 연결 {} · 마지막 스캔 {}",
+            "  Last connected {} · Last scanned {}",
             d.last_seen,
-            d.last_scan_at.as_deref().unwrap_or("없음")
+            d.last_scan_at.as_deref().unwrap_or("never")
         );
-        println!("  볼륨 시리얼 {}", d.serial);
+        println!("  Volume serial {}", d.serial);
         println!();
     }
     Ok(())
@@ -358,13 +358,13 @@ fn cmd_status(json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("등록된 하드   {}개", s.drive_count);
-    println!("인덱싱된 항목 {}개 (파일 {} · 폴더 {})", s.entry_count, s.file_count, s.dir_count);
-    println!("인덱스 크기   {}", format_bytes(s.db_bytes));
-    println!("인덱스 위치   {}", s.db_path);
+    println!("Registered drives : {}", s.drive_count);
+    println!("Indexed items     : {} (files {} · folders {})", s.entry_count, s.file_count, s.dir_count);
+    println!("Index size        : {}", format_bytes(s.db_bytes));
+    println!("Index location    : {}", s.db_path);
     println!(
-        "자동 인덱싱   {}",
-        if task::exists() { "켜짐" } else { "꺼짐 (`drive-archive setup-task`로 켤 수 있습니다)" }
+        "Auto indexing     : {}",
+        if task::exists() { "on" } else { "off (run `drive-archive setup-task` to enable)" }
     );
     Ok(())
 }
@@ -373,11 +373,11 @@ fn cmd_forget(name: &str) -> Result<()> {
     let conn = db::open()?;
     match db::forget(&conn, name)? {
         Some((label, removed)) => {
-            println!("'{label}' 하드를 인덱스에서 제거했습니다 (항목 {removed}개).");
+            println!("Removed drive '{label}' from the index ({removed} items).");
         }
         None => {
-            println!("'{name}'에 해당하는 하드가 인덱스에 없습니다.");
-            println!("`drive-archive drives`로 등록된 하드를 확인하세요.");
+            println!("No drive matching '{name}' found in the index.");
+            println!("Run `drive-archive drives` to see registered drives.");
         }
     }
     Ok(())
@@ -386,30 +386,30 @@ fn cmd_forget(name: &str) -> Result<()> {
 fn cmd_setup_task() -> Result<()> {
     let exe = task::current_exe()?;
     task::setup(&exe)?;
-    println!("자동 인덱싱과 웹 화면 작업을 등록했습니다.");
-    println!("  실행 파일: {}", exe.display());
-    println!("  이제 외장하드를 연결하면 인덱스가 자동으로 갱신됩니다.");
+    println!("Registered automatic indexing and the web page task.");
+    println!("  Executable: {}", exe.display());
+    println!("  The index will now update automatically when you connect an external drive.");
 
     // 지금 꽂혀 있는 하드는 마운트 이벤트가 이미 지나갔으므로 한 번 깨워 준다.
     match task::run_now() {
-        Ok(()) => println!("  지금 연결되어 있는 하드도 백그라운드에서 인덱싱을 시작했습니다."),
-        Err(e) => eprintln!("  다만 지금 연결된 하드의 인덱싱을 시작하지 못했습니다: {e:#}"),
+        Ok(()) => println!("  Also started indexing currently connected drives in the background."),
+        Err(e) => eprintln!("  However, indexing of currently connected drives could not be started: {e:#}"),
     }
 
     if !auth::is_configured() {
-        eprintln!("\n주의: 웹 화면 비밀번호가 없어 웹 화면 작업은 뜨자마자 종료됩니다.");
-        eprintln!("`drive-archive passwd`로 비밀번호를 먼저 설정하세요.");
+        eprintln!("\nNote: no web page password is set, so the web page task will exit as soon as it starts.");
+        eprintln!("Set a password first with `drive-archive passwd`.");
     }
 
-    println!("\n주의: 실행 파일을 다른 폴더로 옮기면 `setup-task`를 다시 실행해야 합니다.");
+    println!("\nNote: if you move the executable to a different folder, run `setup-task` again.");
     Ok(())
 }
 
 fn cmd_remove_task() -> Result<()> {
     if task::remove()? {
-        println!("자동 인덱싱과 웹 화면 작업 등록을 해제했습니다. 인덱스 자체는 그대로 남아 있습니다.");
+        println!("Removed the automatic indexing and web page task registration. The index itself is kept.");
     } else {
-        println!("자동 인덱싱과 웹 화면 작업이 등록되어 있지 않습니다.");
+        println!("No automatic indexing or web page task is registered.");
     }
     Ok(())
 }
@@ -420,13 +420,13 @@ fn cmd_remove_task() -> Result<()> {
 /// 있는 것은 실수로 본다.
 fn check_new_password(first: &str, second: &str) -> Result<String> {
     if first != second {
-        anyhow::bail!("두 번 입력한 값이 다릅니다.");
+        anyhow::bail!("The two entries do not match.");
     }
     if first.trim().is_empty() {
-        anyhow::bail!("비밀번호가 비어 있습니다.");
+        anyhow::bail!("Password is empty.");
     }
     if first.chars().count() < 8 {
-        anyhow::bail!("비밀번호는 8자 이상이어야 합니다. 밖에서 접속할 수 있는 화면입니다.");
+        anyhow::bail!("Password must be at least 8 characters. This screen is reachable from outside.");
     }
     Ok(first.to_string())
 }
@@ -445,7 +445,7 @@ fn read_hidden(prompt: &str) -> Result<String> {
     print!("{prompt}");
     std::io::stdout().flush().ok();
 
-    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.context("표준 입력을 열 수 없습니다")?;
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.context("Could not open standard input")?;
     let mut mode = CONSOLE_MODE::default();
     let is_console = unsafe { GetConsoleMode(handle, &mut mode) }.is_ok();
     if is_console {
@@ -453,7 +453,7 @@ fn read_hidden(prompt: &str) -> Result<String> {
     }
 
     let mut line = String::new();
-    let n = std::io::stdin().lock().read_line(&mut line).context("입력을 읽을 수 없습니다")?;
+    let n = std::io::stdin().lock().read_line(&mut line).context("Could not read input")?;
 
     if is_console {
         let _ = unsafe { SetConsoleMode(handle, mode) };
@@ -463,7 +463,7 @@ fn read_hidden(prompt: &str) -> Result<String> {
     if n == 0 {
         // 파이프가 닫혔거나 입력이 끝났다. 그냥 빈 문자열을 돌려주면 되묻는
         // 쪽이 영원히 돈다 — 여기서 끊어야 비대화형 호출이 멈추지 않는다.
-        anyhow::bail!("입력이 닫혀 있습니다. 터미널에서 직접 실행해 주세요.");
+        anyhow::bail!("Input is closed. Run this from an interactive terminal.");
     }
 
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
@@ -471,8 +471,8 @@ fn read_hidden(prompt: &str) -> Result<String> {
 
 /// 새 비밀번호를 두 번 받아 저장한다. `install`도 이 함수를 쓴다.
 fn prompt_and_set_password() -> Result<()> {
-    let first = read_hidden("새 비밀번호 (8자 이상): ")?;
-    let second = read_hidden("한 번 더: ")?;
+    let first = read_hidden("New password (8+ characters): ")?;
+    let second = read_hidden("Retype password: ")?;
     let password = check_new_password(&first, &second)?;
     auth::set_password(&password)?;
     Ok(())
@@ -480,13 +480,13 @@ fn prompt_and_set_password() -> Result<()> {
 
 fn cmd_passwd() -> Result<()> {
     if auth::is_configured() {
-        println!("이미 설정된 비밀번호를 새 것으로 바꿉니다.");
+        println!("Changing the existing password.");
     } else {
-        println!("웹 화면에서 쓸 비밀번호를 설정합니다.");
+        println!("Setting the password for the web page.");
     }
     prompt_and_set_password()?;
-    println!("비밀번호를 저장했습니다.");
-    println!("이미 열려 있는 웹 세션은 그대로 살아 있습니다. 모두 끊으려면 서버를 다시 시작하세요.");
+    println!("Password saved.");
+    println!("Existing web sessions remain active. Restart the server to end them all.");
     Ok(())
 }
 

@@ -14,7 +14,7 @@ use crate::volume::Volume;
 /// 인덱스 파일이 놓이는 폴더: `%LOCALAPPDATA%\drive-archive`
 pub fn data_dir() -> Result<PathBuf> {
     let base = std::env::var("LOCALAPPDATA")
-        .context("LOCALAPPDATA 환경 변수를 읽을 수 없습니다. Windows에서 실행해야 합니다.")?;
+        .context("Could not read the LOCALAPPDATA environment variable. This must be run on Windows.")?;
     Ok(PathBuf::from(base).join("drive-archive"))
 }
 
@@ -27,10 +27,10 @@ pub fn db_path() -> Result<PathBuf> {
 pub fn open() -> Result<Connection> {
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir)
-        .with_context(|| format!("데이터 폴더를 만들 수 없습니다: {}", dir.display()))?;
+        .with_context(|| format!("Could not create data folder: {}", dir.display()))?;
     let path = dir.join("index.db");
     let conn = Connection::open(&path)
-        .with_context(|| format!("인덱스를 열 수 없습니다: {}", path.display()))?;
+        .with_context(|| format!("Could not open index: {}", path.display()))?;
     init_schema(&conn)?;
     Ok(conn)
 }
@@ -70,7 +70,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_entries_drive ON entries(drive_id);
         "#,
     )
-    .context("스키마를 만들 수 없습니다")?;
+    .context("Could not create schema")?;
 
     migrate(conn)?;
     Ok(())
@@ -86,7 +86,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             "ALTER TABLE drives ADD COLUMN filesystem TEXT NOT NULL DEFAULT '(알 수 없음)'",
             [],
         )
-        .context("인덱스에 파일 시스템 열을 추가할 수 없습니다")?;
+        .context("Could not add filesystem column to index")?;
     }
     Ok(())
 }
@@ -134,7 +134,7 @@ pub fn upsert_drive(conn: &Connection, vol: &Volume) -> Result<i64> {
             ts
         ],
     )
-    .context("하드 정보를 저장할 수 없습니다")?;
+    .context("Could not save drive info")?;
 
     let id: i64 = conn.query_row(
         "SELECT id FROM drives WHERE volume_serial = ?1",
@@ -276,7 +276,7 @@ pub fn apply_scan(conn: &mut Connection, drive_id: i64, scanned: &[Entry]) -> Re
             stats.removed += 1;
         }
     }
-    tx.commit().context("인덱스 갱신을 저장할 수 없습니다")?;
+    tx.commit().context("Could not save index update")?;
 
     Ok(stats)
 }
@@ -388,7 +388,7 @@ pub fn list_children(
         )
         .optional()?;
     let Some((drive_id, label)) = found else {
-        anyhow::bail!("인덱스에 없는 하드입니다: {serial}");
+        anyhow::bail!("No such drive in the index: {serial}");
     };
 
     let trimmed = dir.trim_matches('\\');

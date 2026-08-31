@@ -206,7 +206,7 @@ pub fn serve() -> Result<()> {
             Ok(request) => handle(&request),
             Err(e) => {
                 // 파싱조차 안 되는 줄은 어떤 요청에 대한 것인지 알 수 없다.
-                eprintln!("drive-archive mcp: 요청을 해석할 수 없습니다: {e}");
+                eprintln!("drive-archive mcp: could not parse request: {e}");
                 continue;
             }
         };

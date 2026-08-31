@@ -47,7 +47,7 @@ impl InstanceLock {
         {
             Ok(f) => Ok(Some(InstanceLock { _file: f })),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("잠금 파일을 만들 수 없습니다: {}", path.display())),
+            Err(e) => Err(e).with_context(|| format!("Could not create lock file: {}", path.display())),
         }
     }
 }
@@ -116,12 +116,12 @@ pub fn sync_volume(conn: &mut rusqlite::Connection, vol: &Volume) -> Result<db::
     let previous = db::entry_count(conn, drive_id)?;
 
     let result = scan::scan_volume(vol)
-        .with_context(|| format!("{} 스캔에 실패했습니다", vol.root_path()))?;
+        .with_context(|| format!("Failed to scan {}", vol.root_path()))?;
 
     // 스캔 도중 하드가 빠지면 그때까지 읽은 만큼만 결과에 남는다.
     // 반영하면 나머지가 전부 삭제된 것으로 처리된다.
     if !volume::still_connected(vol) {
-        bail!("스캔 도중 하드가 분리되었습니다. 인덱스는 그대로 두었습니다");
+        bail!("The drive was disconnected during the scan. The index was left unchanged");
     }
 
     if result.errors > 0 {
@@ -133,9 +133,9 @@ pub fn sync_volume(conn: &mut rusqlite::Connection, vol: &Volume) -> Result<db::
 
     if !is_scan_trustworthy(result.entries.len(), previous, result.errors) {
         bail!(
-            "스캔 결과를 믿을 수 없어 반영하지 않았습니다 \
-             (이전 {previous}개 → 이번 {}개, 읽지 못한 항목 {}개). \
-             하드를 다시 연결해 `drive-archive scan {}`을 실행하세요",
+            "Scan results were not trustworthy, so they were not applied \
+             (previous {previous} → now {}, {} items unreadable). \
+             Reconnect the drive and run `drive-archive scan {}`",
             result.entries.len(),
             result.errors,
             vol.letter
