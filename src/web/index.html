@@ -94,6 +94,16 @@
     outline: none;
   }
 
+  /* iOS Safari는 포커스된 입력칸의 글자가 16px보다 작으면 화면을 확대한다.
+     좁은 화면에서는 계산된 글자 크기가 그 아래로 내려가 가상 키보드가 뜰 때
+     페이지가 살짝 커진다. 이 입력칸은 어차피 투명이고 보이는 글자는 따로
+     그리므로, 터치 기기에서만 16px로 고정해 확대를 막는다. 대가는 긴 검색어
+     중간을 탭했을 때 커서가 몇 글자 어긋날 수 있다는 것 — 핀치 줌을 막는
+     maximum-scale보다 낫다. */
+  @media (pointer: coarse) {
+    #keeper { font-size: 16px; }
+  }
+
   #shown { position: relative; pointer-events: none; }
 
   #cursor {
