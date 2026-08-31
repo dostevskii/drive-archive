@@ -7,7 +7,7 @@
 //! 127.0.0.1에만 바인딩한다. 인덱스에는 사용자의 파일 이름과 경로가 통째로 들어 있어서,
 //! 같은 네트워크의 다른 기기에 열어 줄 이유가 없다.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 
 use anyhow::{Context, Result};
@@ -55,15 +55,17 @@ pub fn serve(port: u16, open_browser: bool) -> Result<()> {
 
 /// 연결 하나를 처리한다.
 fn handle(mut stream: TcpStream) -> Result<()> {
-    let target = match read_request_target(&mut stream)? {
-        Some(t) => t,
-        None => return Ok(()),
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "?".to_string());
+    let Some(req) = read_request(&mut stream, peer)? else {
+        return Ok(());
     };
-
-    let (path, query) = match target.split_once('?') {
-        Some((p, q)) => (p, q),
-        None => (target.as_str(), ""),
-    };
+    if req.method != "GET" {
+        return respond(&mut stream, 404, "text/plain; charset=utf-8", b"not found");
+    }
+    let (path, query) = (req.path.as_str(), req.query.as_str());
 
     match path {
         "/" | "/index.html" => {
@@ -86,32 +88,114 @@ fn handle(mut stream: TcpStream) -> Result<()> {
     }
 }
 
-/// 요청 줄에서 경로를 꺼낸다. GET이 아니면 `None`을 준다.
+/// 받아 줄 본문의 최대 크기. 로그인 본문은 몇십 바이트라 넉넉히 잡아도 이 정도다.
+const MAX_BODY: usize = 8192;
+
+/// 받아 줄 헤더 전체의 최대 크기. 브라우저 요청은 1KB 안팎이다.
+const MAX_HEADERS: usize = 16 * 1024;
+
+/// 요청 하나.
 ///
-/// 헤더는 쓰지 않지만, 읽지 않고 끊으면 브라우저가 연결 오류로 보므로 끝까지 읽어 버린다.
-fn read_request_target(stream: &mut TcpStream) -> Result<Option<String>> {
-    let mut reader = BufReader::new(stream.try_clone()?);
+/// 헤더 이름은 소문자로 눕혀 보관한다. HTTP 헤더 이름은 대소문자를 가리지 않는데
+/// 프록시마다 다르게 적어 보낸다.
+pub struct Request {
+    pub method: String,
+    pub path: String,
+    pub query: String,
+    headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    /// 소켓 상대 주소. 터널 뒤에서는 전부 127.0.0.1로 보인다.
+    peer: String,
+}
+
+impl Request {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// 쿠키 하나를 이름으로 꺼낸다.
+    pub fn cookie(&self, name: &str) -> Option<&str> {
+        let raw = self.header("cookie")?;
+        raw.split(';').find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            (k.trim() == name).then(|| v.trim())
+        })
+    }
+
+    /// 로그인 실패를 셀 때 쓸 주소.
+    ///
+    /// 터널을 거치면 소켓 주소가 전부 127.0.0.1이 되어, 그것만 쓰면 한 사람의 오타가
+    /// 전체를 잠근다. 다만 이 헤더는 보내는 쪽이 지어낼 수 있으므로 이것만 믿지
+    /// 않는다 — `auth::Gate`가 전역 카운터를 함께 센다.
+    pub fn client_ip(&self) -> String {
+        self.header("x-forwarded-for")
+            .and_then(|v| v.split(',').next())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.peer.clone())
+    }
+
+    /// 터널이 HTTPS로 받아 넘긴 요청인가. 쿠키에 `Secure`를 붙일지 정하는 데 쓴다.
+    pub fn is_https(&self) -> bool {
+        self.header("x-forwarded-proto").is_some_and(|v| v.eq_ignore_ascii_case("https"))
+    }
+}
+
+/// 요청 하나를 끝까지 읽는다. 읽을 수 없는 요청이면 `None`을 준다.
+fn read_request(stream: &mut TcpStream, peer: String) -> Result<Option<Request>> {
+    // 터널을 거쳐 아무나 닿는 자리다. 한 글자씩 흘리며 스레드를 영영 붙드는
+    // 연결은 시간으로 끊고, 전체 요청은 크기로 자른다. `take`가 헤더 한 줄이
+    // 한없이 자라는 것까지 막는다.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let mut reader = BufReader::new(stream.try_clone()?.take(64 * 1024));
+
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
         return Ok(None);
     }
-
     let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("");
+    let method = parts.next().unwrap_or("").to_string();
     let target = parts.next().unwrap_or("/").to_string();
 
-    // 헤더를 빈 줄까지 흘려보낸다.
+    let mut headers = Vec::new();
+    let mut header_bytes = 0usize;
     loop {
         let mut h = String::new();
         if reader.read_line(&mut h)? == 0 || h == "\r\n" || h == "\n" {
             break;
         }
+        header_bytes += h.len();
+        if header_bytes > MAX_HEADERS {
+            return Ok(None);
+        }
+        if let Some((k, v)) = h.split_once(':') {
+            headers.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+        }
     }
 
-    if method != "GET" {
+    let len: usize = headers
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .and_then(|(_, v)| v.parse().ok())
+        .unwrap_or(0);
+    if len > MAX_BODY {
         return Ok(None);
     }
-    Ok(Some(target))
+    let mut body = vec![0u8; len];
+    if len > 0 {
+        reader.read_exact(&mut body)?;
+    }
+
+    let (path, query) = match target.split_once('?') {
+        Some((p, q)) => (p.to_string(), q.to_string()),
+        None => (target, String::new()),
+    };
+
+    Ok(Some(Request { method, path, query, headers, body, peer }))
 }
 
 /// 하드 목록을 JSON으로 만든다.
@@ -339,5 +423,105 @@ mod tests {
 
         let missing = get("/없는경로");
         assert!(missing.starts_with("HTTP/1.1 404"));
+    }
+
+    /// 테스트용 요청을 하나 만든다.
+    fn req(raw: &str) -> Option<Request> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let raw = raw.to_string();
+        std::thread::spawn(move || {
+            let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+            let _ = s.write_all(raw.as_bytes());
+            let _ = s.flush();
+            // 서버가 읽을 때까지 붙들고 있는다. 먼저 닫으면 본문이 잘린다.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request(&mut stream, "1.2.3.4".to_string()).unwrap()
+    }
+
+    #[test]
+    fn 경로와_쿼리를_나눠_읽는다() {
+        let r = req("GET /api/search?q=%ED%95%9C HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert_eq!(r.method, "GET");
+        assert_eq!(r.path, "/api/search");
+        assert_eq!(r.query, "q=%ED%95%9C");
+    }
+
+    #[test]
+    fn 쿼리가_없으면_빈_문자열이다() {
+        let r = req("GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert_eq!(r.path, "/");
+        assert_eq!(r.query, "");
+    }
+
+    #[test]
+    fn 헤더_이름은_대소문자를_가리지_않는다() {
+        let r = req("GET / HTTP/1.1\r\nX-Forwarded-Proto: https\r\n\r\n").unwrap();
+        assert_eq!(r.header("x-forwarded-proto"), Some("https"));
+        assert_eq!(r.header("X-Forwarded-Proto"), Some("https"));
+        assert!(r.is_https());
+    }
+
+    #[test]
+    fn 프로토콜_헤더가_없으면_평문으로_본다() {
+        let r = req("GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert!(!r.is_https());
+    }
+
+    #[test]
+    fn 쿠키를_이름으로_꺼낸다() {
+        let r = req("GET / HTTP/1.1\r\nCookie: other=1; da=abc123; last=z\r\n\r\n").unwrap();
+        assert_eq!(r.cookie("da"), Some("abc123"));
+        assert_eq!(r.cookie("other"), Some("1"));
+        assert_eq!(r.cookie("last"), Some("z"));
+        assert_eq!(r.cookie("없는것"), None);
+    }
+
+    #[test]
+    fn 쿠키가_없어도_터지지_않는다() {
+        let r = req("GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert_eq!(r.cookie("da"), None);
+        let r = req("GET / HTTP/1.1\r\nCookie: \r\n\r\n").unwrap();
+        assert_eq!(r.cookie("da"), None);
+    }
+
+    #[test]
+    fn 포스트_본문을_읽는다() {
+        let body = r#"{"password":"열려라참깨"}"#;
+        let raw = format!(
+            "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let r = req(&raw).unwrap();
+        assert_eq!(r.method, "POST");
+        assert_eq!(String::from_utf8_lossy(&r.body), body);
+    }
+
+    #[test]
+    fn 본문이_너무_크면_받지_않는다() {
+        // 로그인 본문은 몇십 바이트다. 큰 것을 받아 줄 이유가 없다.
+        let raw = format!(
+            "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            MAX_BODY + 1
+        );
+        assert!(req(&raw).is_none());
+    }
+
+    #[test]
+    fn 헤더를_한없이_받아_주지_않는다() {
+        // 터널을 거쳐 아무나 보낼 수 있는 자리다. 헤더를 끝없이 흘리면
+        // 요청마다 메모리가 그만큼 자란다.
+        let raw = format!("GET / HTTP/1.1\r\n{}\r\n", "X-Filler: 채움\r\n".repeat(2000));
+        assert!(req(&raw).is_none());
+    }
+
+    #[test]
+    fn 전달받은_주소를_쓰고_없으면_소켓_주소를_쓴다() {
+        let r = req("GET / HTTP/1.1\r\nX-Forwarded-For: 9.9.9.9, 8.8.8.8\r\n\r\n").unwrap();
+        assert_eq!(r.client_ip(), "9.9.9.9", "맨 앞이 원래 보낸 쪽이다");
+        let r = req("GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert_eq!(r.client_ip(), "1.2.3.4");
     }
 }
