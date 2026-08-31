@@ -18,8 +18,12 @@
     --blue: #000fc0;   /* 바탕 */
     --fg:   #ffffff;   /* 글자 */
     --bar:  #dee0de;   /* 반전 막대 (타이틀·검색·선택 행) */
-    --line: 21px;      /* 한 줄 높이 */
     --cols: 41;        /* 화면의 가로 칸 수. 시안이 41칸이다. */
+    /* 고정폭 한 칸의 폭 ÷ 글자 크기. 위 Step 1에서 실측한 값이다.
+       41칸이 화면에 정확히 들어가야 해서 추정값을 쓰지 않는다. */
+    --ratio: 0.6154;
+    /* 좌우 여백의 합. body padding과 맞춰 둔다. */
+    --pad: calc(min(81px, 6vw) + 24px);
   }
 
   * { box-sizing: border-box; }
@@ -30,13 +34,21 @@
     margin: 0;
     background: var(--blue);
     color: var(--fg);
-    font: 18px/var(--line) 'FiraD2', 'D2Coding', 'Consolas', monospace;
+    /* 데스크톱은 18px 그대로다. 화면이 좁아지면 41칸이 들어가는 크기까지 줄인다.
+       칸 수를 줄이지 않는 이유는 표 그리기가 전부 41칸을 전제로 짜여 있어서다. */
+    font-size: min(18px, calc((100vw - var(--pad)) / (var(--cols) * var(--ratio))));
+    line-height: var(--line);
+    font-family: 'FiraD2', 'D2Coding', 'Consolas', monospace;
     /* 시안의 좌 여백 81px. 화면이 좁으면 줄인다. */
     padding: 42px 24px 42px min(81px, 6vw);
     display: flex;
     flex-direction: column;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
+    /* 21px는 18px 글자에 대한 값이므로 비율은 7/6이다. 글자 크기가 화면
+       폭에 따라 줄어도 줄 높이가 따라오려면 em이어야 하고, em은 이 요소
+       자신의 글자 크기를 기준으로 하므로 :root가 아니라 body에 둔다. */
+    --line: 1.1667em;
   }
 
   /* 화면 전체가 41칸 폭을 넘지 않는다. TUI 한 컬럼처럼 보이게 하는 핵심이다. */
@@ -188,7 +200,6 @@ VWXYZ0123456789&amp;-:.+=
 "use strict";
 
 const COLS = 41;
-const LINE = 21;                       // CSS의 --line 과 같아야 한다
 const SIZE_W = 9;                      // 탐색 화면의 크기 칸
 
 /** 위로 올라가는 줄. 파일 브라우저의 `..` 그대로다. */
@@ -279,13 +290,19 @@ function humanSize(b) {
   return (v < 10 ? v.toFixed(1) : Math.round(v)) + ' ' + unit[i];
 }
 
+/** 지금 줄 높이(px). 글자 크기가 화면 폭에 따라 달라지므로 상수로 둘 수 없다. */
+function lineH() {
+  return parseFloat(getComputedStyle(document.body).lineHeight) || 21;
+}
+
 /** 목록 높이를 줄 높이의 정수배로 고정한다. 마지막 줄이 반만 보이지 않게. */
 function fitList() {
+  const line = lineH();
   el.list.style.flex = '1 1 auto';
   el.list.style.height = '';
-  const rows = Math.max(1, Math.floor(el.list.clientHeight / LINE));
+  const rows = Math.max(1, Math.floor(el.list.clientHeight / line));
   el.list.style.flex = 'none';
-  el.list.style.height = `${rows * LINE}px`;
+  el.list.style.height = `${rows * line}px`;
 }
 
 /* ── 시계 ──────────────────────────────────────────────
@@ -521,7 +538,7 @@ function select(i) {
 
 /** 한 화면에 들어가는 행 수. 좌우 키가 한 화면씩 움직이는 데 쓴다. */
 function page() {
-  return Math.max(1, Math.round(el.list.clientHeight / LINE));
+  return Math.max(1, Math.round(el.list.clientHeight / lineH()));
 }
 
 /* ── 데이터 ────────────────────────────────────────── */
