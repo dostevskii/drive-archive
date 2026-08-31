@@ -343,6 +343,7 @@ function paintSearch() {
 
 /** 게이트로 들어간다. 목록을 지우고 비밀번호를 묻는다. */
 function showGate(note) {
+  clearTimeout(searchTimer);   // 게이트 직전에 예약된 검색이 안내를 덮어쓰지 않게 한다
   state.gate = true;
   state.rows = [];
   state.hits = [];
@@ -351,6 +352,7 @@ function showGate(note) {
   state.origin = null;
   document.body.classList.add('gate');
   el.keeper.value = '';
+  paintList(); paintMore();   // 이전 목록을 DOM에서도 지운다. 가려 두는 것으로는 게이트의 의도에 못 미친다
   el.where.textContent = note || '';
   setInsert(true);
   paintSearch();
@@ -381,8 +383,10 @@ async function tryLogin() {
     paintSearch();
     if (r.status === 429) {
       el.where.textContent = `너무 여러 번 틀렸습니다. ${data.seconds || 60}초 뒤에 다시 시도하세요.`;
-    } else {
+    } else if (r.status === 401) {
       el.where.textContent = 'WRONG PASSWORD';
+    } else {
+      el.where.textContent = `서버 오류입니다 (${r.status}). 서버 로그를 확인하세요.`;
     }
   } catch (e) {
     el.where.textContent = '연결할 수 없습니다: ' + e.message;

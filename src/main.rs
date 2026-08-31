@@ -105,10 +105,10 @@ enum Cmd {
     /// 웹 화면 비밀번호를 설정하거나 바꿉니다
     Passwd,
 
-    /// 외장하드 연결 시 자동 인덱싱하도록 작업 스케줄러에 등록합니다
+    /// 자동 인덱싱과 웹 화면 작업을 작업 스케줄러에 등록합니다
     SetupTask,
 
-    /// 작업 스케줄러 등록을 해제합니다
+    /// 작업 스케줄러 등록(자동 인덱싱·웹 화면)을 해제합니다
     RemoveTask,
 }
 
@@ -386,7 +386,7 @@ fn cmd_forget(name: &str) -> Result<()> {
 fn cmd_setup_task() -> Result<()> {
     let exe = task::current_exe()?;
     task::setup(&exe)?;
-    println!("자동 인덱싱을 켰습니다.");
+    println!("자동 인덱싱과 웹 화면 작업을 등록했습니다.");
     println!("  실행 파일: {}", exe.display());
     println!("  이제 외장하드를 연결하면 인덱스가 자동으로 갱신됩니다.");
 
@@ -396,15 +396,20 @@ fn cmd_setup_task() -> Result<()> {
         Err(e) => eprintln!("  다만 지금 연결된 하드의 인덱싱을 시작하지 못했습니다: {e:#}"),
     }
 
+    if !auth::is_configured() {
+        eprintln!("\n주의: 웹 화면 비밀번호가 없어 웹 화면 작업은 뜨자마자 종료됩니다.");
+        eprintln!("`drive-archive passwd`로 비밀번호를 먼저 설정하세요.");
+    }
+
     println!("\n주의: 실행 파일을 다른 폴더로 옮기면 `setup-task`를 다시 실행해야 합니다.");
     Ok(())
 }
 
 fn cmd_remove_task() -> Result<()> {
     if task::remove()? {
-        println!("자동 인덱싱을 껐습니다. 인덱스 자체는 그대로 남아 있습니다.");
+        println!("자동 인덱싱과 웹 화면 작업 등록을 해제했습니다. 인덱스 자체는 그대로 남아 있습니다.");
     } else {
-        println!("자동 인덱싱이 등록되어 있지 않습니다.");
+        println!("자동 인덱싱과 웹 화면 작업이 등록되어 있지 않습니다.");
     }
     Ok(())
 }
@@ -448,13 +453,19 @@ fn read_hidden(prompt: &str) -> Result<String> {
     }
 
     let mut line = String::new();
-    let read = std::io::stdin().lock().read_line(&mut line);
+    let n = std::io::stdin().lock().read_line(&mut line).context("입력을 읽을 수 없습니다")?;
 
     if is_console {
         let _ = unsafe { SetConsoleMode(handle, mode) };
         println!();   // 사용자가 누른 Enter가 화면에 남지 않았으므로 줄을 바꿔 준다
     }
-    read.context("입력을 읽을 수 없습니다")?;
+
+    if n == 0 {
+        // 파이프가 닫혔거나 입력이 끝났다. 그냥 빈 문자열을 돌려주면 되묻는
+        // 쪽이 영원히 돈다 — 여기서 끊어야 비대화형 호출이 멈추지 않는다.
+        anyhow::bail!("입력이 닫혀 있습니다. 터미널에서 직접 실행해 주세요.");
+    }
+
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
 

@@ -64,7 +64,7 @@ On mobile devices, the text size adjusts to the screen width, and all gestures w
 ## What it does
 
 **It uses no resources when idle.**
-This is not a background program. Windows Task Scheduler starts it only when it detects an "external drive connected" event; it runs briefly and exits completely. With no resident process, idle memory and CPU usage are zero.
+Indexing runs without a resident process — the application starts only when you plug in a drive and exits when done. The web interface is provided as a server that starts when you log on, from v0.4.0 onward. This design ensures the interface is only accessible while the computer is powered on.
 
 **Changes are picked up automatically.**
 Reconnect a drive and it diffs against the previous index — new, modified, and deleted files are all reconciled.
@@ -134,7 +134,9 @@ Open PowerShell in that folder:
 
 That single line does all of this:
 
+- Prompts for and sets a web interface password (interactive)
 - Registers a Task Scheduler job so drives are indexed on connection
+- Registers a Task Scheduler job to start the web server at login
 - Registers the MCP server with Claude Desktop and Claude Code
 
 Registering the scheduled task needs administrator rights, so a UAC prompt appears. Click Yes.

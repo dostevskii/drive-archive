@@ -192,11 +192,19 @@ pub fn install() -> Result<()> {
         println!("[1/3] 웹 화면에서 쓸 비밀번호를 정해 주세요.");
         println!("      인덱스에는 파일 이름과 경로가 모두 들어 있습니다. 밖에서 들어오려면");
         println!("      이 비밀번호가 필요합니다. 입력하는 글자는 화면에 찍히지 않습니다.\n");
+        let mut tries = 0;
         loop {
             match crate::prompt_and_set_password() {
                 Ok(()) => break,
                 Err(e) => {
+                    tries += 1;
                     eprintln!("      {e}");
+                    if tries >= 3 {
+                        anyhow::bail!(
+                            "비밀번호를 설정하지 못해 설치를 중단합니다.\n\
+                             `drive-archive install`을 다시 실행해 주세요."
+                        );
+                    }
                     eprintln!("      다시 입력해 주세요.\n");
                 }
             }
@@ -288,6 +296,7 @@ pub fn uninstall() -> Result<()> {
 
     println!("\n인덱스와 웹 비밀번호는 남아 있습니다.");
     println!("완전히 지우시려면 %LOCALAPPDATA%\\drive-archive 폴더를 삭제하세요.");
+    println!("웹 화면이 떠 있었다면 로그오프하거나 작업 관리자에서 drive-archive를 끝내야 완전히 내려갑니다.");
     Ok(())
 }
 
