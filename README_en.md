@@ -40,6 +40,25 @@ Move around with the mouse, the arrow keys, or VIM keys (`hjkl`). `ESC` enters N
 
 The server binds to `127.0.0.1` only. The index holds your full file names and paths, so there is no reason to expose it to other machines on the network.
 
+### Browse from outside
+
+To view from another machine (such as a phone), set up a tunnel.
+
+**Cloudflare Tunnel:**
+```powershell
+cloudflared tunnel --url http://127.0.0.1:8787
+```
+The free Quick Tunnel generates a new address each time you run it. For a stable address, you need to register a domain with Cloudflare.
+
+**Tailscale Funnel:**
+Get a stable address `https://<machine-name>.<tailnet>.ts.net` with no domain required. You can choose port 443, 8443, or 10000.
+
+Either way, the first visit prompts for `PASSWORD:`. The password is set during `install` and can be changed later with `drive-archive passwd`.
+
+Access works only when the computer is powered on and you are logged in. Logging on automatically launches the web interface.
+
+On mobile devices, the text size adjusts to the screen width, and all gestures work the same way.
+
 ---
 
 ## What it does
@@ -193,6 +212,7 @@ BACKUP-02  [not connected]
 | `drive-archive forget <label>` | Drop a drive you no longer use from the index |
 | `drive-archive mcp` | Run the MCP server (Claude calls this itself) |
 | `drive-archive serve` | Open the browser view of the index (`--port`, `--no-open`) |
+| `drive-archive passwd` | Set or change the password for the web interface (terminal only, no echo) |
 | `drive-archive setup-task` / `remove-task` | Register/unregister just the scheduled task |
 
 ### Tools Claude sees

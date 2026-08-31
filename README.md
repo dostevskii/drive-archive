@@ -40,6 +40,25 @@ $ drive-archive search "2024 브랜딩"
 
 서버는 `127.0.0.1`에만 열립니다. 인덱스에는 파일 이름과 경로가 통째로 들어 있어서, 같은 네트워크의 다른 기기에 열어 줄 이유가 없기 때문입니다.
 
+### 밖에서 보기
+
+같은 컴퓨터가 아닌 다른 기기(휴대폰 등)에서 보려면 터널을 붙입니다.
+
+**Cloudflare Tunnel:**
+```powershell
+cloudflared tunnel --url http://127.0.0.1:8787
+```
+무료 Quick Tunnel은 실행할 때마다 주소가 바뀝니다. 고정 주소를 원하면 Cloudflare에 도메인을 등록해 야 합니다.
+
+**Tailscale Funnel:**
+도메인 없이 고정 주소 `https://<기기명>.<테일넷>.ts.net`을 얻습니다. 포트는 443, 8443, 10000 중 하나를 선택할 수 있습니다.
+
+어느 쪽이든 처음 들어가면 `PASSWORD:`를 묻습니다. 비밀번호는 `install` 때 설정했으며, 나중에 바꾸려면 `drive-archive passwd`를 실행합니다.
+
+컴퓨터가 켜져 있고 로그온 상태일 때만 접속할 수 있습니다. 로그온하면 웹 화면이 자동으로 띄워집니다.
+
+모바일 기기의 화면 폭에 맞춰 글자 크기가 자동으로 줄어들며, 같은 조작이 그대로 됩니다.
+
 ---
 
 ## 특징
@@ -193,6 +212,7 @@ BACKUP-02  [연결 안 됨]
 | `drive-archive forget <라벨>` | 더 이상 쓰지 않는 하드를 인덱스에서 제거 |
 | `drive-archive mcp` | MCP 서버 실행 (Claude가 자동으로 호출) |
 | `drive-archive serve` | 브라우저로 인덱스를 보는 화면을 띄움 (`--port`, `--no-open`) |
+| `drive-archive passwd` | 웹 화면 비밀번호 설정·변경 (터미널 전용, 에코 없음) |
 | `drive-archive setup-task` / `remove-task` | 작업 스케줄러만 따로 등록/해제 |
 
 ### Claude가 쓰는 도구

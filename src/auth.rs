@@ -87,10 +87,6 @@ pub fn set_password(password: &str) -> Result<()> {
     set_password_at(&crate::db::data_dir()?, password)
 }
 
-pub fn verify(password: &str) -> Result<bool> {
-    verify_at(&crate::db::data_dir()?, password)
-}
-
 pub fn is_configured() -> bool {
     crate::db::data_dir().is_ok_and(|d| is_configured_at(&d))
 }
@@ -138,6 +134,7 @@ impl Sessions {
     }
 
     /// 살아 있는 세션 수. 테스트에서 쓴다.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.live.lock().unwrap().len()
     }
