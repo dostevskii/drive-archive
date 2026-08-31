@@ -143,6 +143,75 @@ impl Sessions {
     }
 }
 
+/// 한 주소가 이만큼 틀리면 잠근다.
+const IP_LIMIT: u32 = 5;
+/// 주소를 가리지 않고 이만큼 쌓이면 전부 잠근다.
+const GLOBAL_LIMIT: u32 = 20;
+/// 잠가 두는 시간.
+const LOCK_SECS: u64 = 60;
+
+/// 로그인 실패를 세어 무차별 대입을 막는다.
+///
+/// argon2 검증 자체가 느려 초당 수십 회가 한계지만, 밖에 열리는 이상 잠금이 있어야 한다.
+#[derive(Default)]
+pub struct Gate {
+    /// 주소별 (실패 횟수, 마지막 실패 시각)
+    per_ip: Mutex<HashMap<String, (u32, SystemTime)>>,
+    /// 주소를 가리지 않은 (실패 횟수, 마지막 실패 시각).
+    /// `X-Forwarded-For`를 지어내 주소별 카운터를 피해 가는 경우를 막는다.
+    global: Mutex<Option<(u32, SystemTime)>>,
+}
+
+/// 마지막 실패로부터 얼마 지났는지 보고, 잠금 시간이 남았으면 그 초를 준다.
+fn lock_remaining(at: SystemTime, now: SystemTime) -> Option<u64> {
+    let passed = now.duration_since(at).unwrap_or_default().as_secs();
+    (passed <= LOCK_SECS).then(|| LOCK_SECS - passed)
+}
+
+impl Gate {
+    pub fn note_failure(&self, ip: &str, now: SystemTime) {
+        {
+            let mut per_ip = self.per_ip.lock().unwrap();
+            let e = per_ip.entry(ip.to_string()).or_insert((0, now));
+            // 잠금 시간이 지났으면 처음부터 다시 센다.
+            if lock_remaining(e.1, now).is_none() {
+                *e = (0, now);
+            }
+            e.0 += 1;
+            e.1 = now;
+        }
+
+        let mut g = self.global.lock().unwrap();
+        let cur = match *g {
+            Some((n, at)) if lock_remaining(at, now).is_some() => n,
+            _ => 0,
+        };
+        *g = Some((cur + 1, now));
+    }
+
+    pub fn note_success(&self, ip: &str) {
+        self.per_ip.lock().unwrap().remove(ip);
+    }
+
+    /// 잠겨 있으면 남은 초를 준다.
+    pub fn locked_for(&self, ip: &str, now: SystemTime) -> Option<u64> {
+        if let Some((n, at)) = *self.global.lock().unwrap() {
+            if n >= GLOBAL_LIMIT {
+                if let Some(left) = lock_remaining(at, now) {
+                    return Some(left);
+                }
+            }
+        }
+
+        let per_ip = self.per_ip.lock().unwrap();
+        let &(n, at) = per_ip.get(ip)?;
+        if n < IP_LIMIT {
+            return None;
+        }
+        lock_remaining(at, now)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +329,80 @@ mod tests {
         let 하루뒤 = now + Duration::from_secs(SESSION_SECS + 1);
         s.check(&t, 하루뒤);
         assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn 다섯_번_틀리면_그_주소가_잠긴다() {
+        let g = Gate::default();
+        let now = SystemTime::UNIX_EPOCH;
+        for _ in 0..4 {
+            g.note_failure("1.1.1.1", now);
+        }
+        assert_eq!(g.locked_for("1.1.1.1", now), None, "4회까지는 열려 있다");
+        g.note_failure("1.1.1.1", now);
+        assert_eq!(g.locked_for("1.1.1.1", now), Some(LOCK_SECS));
+    }
+
+    #[test]
+    fn 잠금은_시간이_지나면_풀린다() {
+        let g = Gate::default();
+        let now = SystemTime::UNIX_EPOCH;
+        for _ in 0..5 {
+            g.note_failure("1.1.1.1", now);
+        }
+        let 나중 = now + Duration::from_secs(LOCK_SECS + 1);
+        assert_eq!(g.locked_for("1.1.1.1", 나중), None);
+    }
+
+    #[test]
+    fn 성공하면_카운터가_지워진다() {
+        let g = Gate::default();
+        let now = SystemTime::UNIX_EPOCH;
+        for _ in 0..4 {
+            g.note_failure("1.1.1.1", now);
+        }
+        g.note_success("1.1.1.1");
+        for _ in 0..4 {
+            g.note_failure("1.1.1.1", now);
+        }
+        assert_eq!(g.locked_for("1.1.1.1", now), None, "성공이 카운터를 지웠어야 한다");
+    }
+
+    #[test]
+    fn 다른_주소는_말려들지_않는다() {
+        let g = Gate::default();
+        let now = SystemTime::UNIX_EPOCH;
+        for _ in 0..5 {
+            g.note_failure("1.1.1.1", now);
+        }
+        assert!(g.locked_for("1.1.1.1", now).is_some());
+        assert_eq!(g.locked_for("2.2.2.2", now), None);
+    }
+
+    #[test]
+    fn 주소를_매번_바꿔도_전역_카운터에_걸린다() {
+        // X-Forwarded-For는 보내는 쪽이 지어낼 수 있다. 주소별 카운터만 두면
+        // 매 요청마다 다른 값을 적어 잠금을 통째로 피해 간다.
+        let g = Gate::default();
+        let now = SystemTime::UNIX_EPOCH;
+        for i in 0..GLOBAL_LIMIT {
+            g.note_failure(&format!("10.0.0.{i}"), now);
+        }
+        assert_eq!(
+            g.locked_for("처음보는주소", now),
+            Some(LOCK_SECS),
+            "전역 카운터가 한도에 닿으면 처음 보는 주소도 막아야 한다"
+        );
+    }
+
+    #[test]
+    fn 전역_잠금도_시간이_지나면_풀린다() {
+        let g = Gate::default();
+        let now = SystemTime::UNIX_EPOCH;
+        for i in 0..GLOBAL_LIMIT {
+            g.note_failure(&format!("10.0.0.{i}"), now);
+        }
+        let 나중 = now + Duration::from_secs(LOCK_SECS + 1);
+        assert_eq!(g.locked_for("처음보는주소", 나중), None);
     }
 }
