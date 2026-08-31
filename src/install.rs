@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::auth;
 use crate::elevation;
+use crate::envpath;
 use crate::task;
 
 /// MCP 설정에 등록될 서버 이름.
@@ -186,10 +187,10 @@ pub fn install() -> Result<()> {
     // 웹 화면은 밖에서도 들어올 수 있다. 비밀번호 없이 설치를 끝내면 그 상태로
     // 터널이 붙는다. 그래서 여기서 반드시 받는다.
     if auth::is_configured() {
-        println!("[1/3] A web page password is already set.");
+        println!("[1/4] A web page password is already set.");
         println!("      To change it later, run `drive-archive passwd`.");
     } else {
-        println!("[1/3] Please set a password for the web page.");
+        println!("[1/4] Please set a password for the web page.");
         println!("      The index contains every file name and path. Anyone connecting from");
         println!("      outside will need this password. What you type will not be shown.\n");
         let mut tries = 0;
@@ -213,7 +214,7 @@ pub fn install() -> Result<()> {
     }
 
     task::setup(&exe)?;
-    println!("\n[2/3] Registered automatic indexing and the web page.");
+    println!("\n[2/4] Registered automatic indexing and the web page.");
     println!("      The index will update automatically when you connect an external drive.");
     println!("      The web page opens automatically at login: http://127.0.0.1:8787/");
 
@@ -237,6 +238,21 @@ pub fn install() -> Result<()> {
         }
     }
 
+    // PATH는 편의 기능이지 필수 기능이 아니다. 실패해도 설치를 계속 진행한다.
+    // exe는 std::env::current_exe()가 돌려준 절대 경로라 parent()가 없을 수 없다.
+    let path_result = exe.parent().context("Could not determine the install folder").and_then(envpath::add);
+    match path_result {
+        Ok(true) => {
+            println!("\n[3/4] Added the install folder to your PATH.");
+            println!("      Open a NEW terminal to use the `drive-archive` command directly.");
+        }
+        Ok(false) => println!("\n[3/4] PATH already contains the install folder."),
+        Err(e) => {
+            eprintln!("\n[3/4] Could not update PATH: {e:#}");
+            eprintln!("      You can still run the exe by its full path.");
+        }
+    }
+
     let mut registered = Vec::new();
     for (name, path) in claude_config_targets() {
         match register_mcp(&path, &exe) {
@@ -247,10 +263,10 @@ pub fn install() -> Result<()> {
     }
 
     if registered.is_empty() {
-        println!("\n[3/3] Claude was not found, so the MCP connection was skipped.");
+        println!("\n[4/4] Claude was not found, so the MCP connection was skipped.");
         println!("      Install Claude Desktop or Claude Code, then run this command again.");
     } else {
-        println!("\n[3/3] Connected to {}.", registered.join(", "));
+        println!("\n[4/4] Connected to {}.", registered.join(", "));
         println!("      This takes effect once you fully quit and reopen Claude.");
         println!("      You can now ask Claude things like:");
         println!("        \"Which external drive has last year's branding project?\"");
@@ -274,9 +290,22 @@ pub fn uninstall() -> Result<()> {
     }
 
     if task::remove()? {
-        println!("[1/2] Removed automatic indexing and web page registration.");
+        println!("[1/3] Removed automatic indexing and web page registration.");
     } else {
-        println!("[1/2] No registered task was found.");
+        println!("[1/3] No registered task was found.");
+    }
+
+    // PATH는 편의 기능이지 필수 기능이 아니다. 실패해도 제거를 계속 진행한다.
+    // exe는 std::env::current_exe()가 돌려준 절대 경로라 parent()가 없을 수 없다.
+    let exe = task::current_exe()?;
+    let path_result = exe.parent().context("Could not determine the install folder").and_then(envpath::remove);
+    match path_result {
+        Ok(true) => println!("[2/3] Removed the install folder from your PATH."),
+        Ok(false) => println!("[2/3] PATH did not contain the install folder."),
+        Err(e) => {
+            eprintln!("[2/3] Could not update PATH: {e:#}");
+            eprintln!("      You can remove it manually from your user environment variables.");
+        }
     }
 
     let mut removed = Vec::new();
@@ -289,9 +318,9 @@ pub fn uninstall() -> Result<()> {
     }
 
     if removed.is_empty() {
-        println!("[2/2] No connections were registered with Claude.");
+        println!("[3/3] No connections were registered with Claude.");
     } else {
-        println!("[2/2] Removed the connection from {}.", removed.join(", "));
+        println!("[3/3] Removed the connection from {}.", removed.join(", "));
     }
 
     println!("\nThe index and web password remain.");

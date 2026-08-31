@@ -6,6 +6,7 @@
 mod auth;
 mod db;
 mod elevation;
+mod envpath;
 mod install;
 mod mcp;
 mod scan;

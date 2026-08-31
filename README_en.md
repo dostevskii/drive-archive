@@ -137,6 +137,7 @@ That single line does all of this:
 - Prompts for and sets a web interface password (interactive)
 - Registers a Task Scheduler job so drives are indexed on connection
 - Registers a Task Scheduler job to start the web server at login
+- Adds the executable's folder to your user PATH (run `drive-archive` directly from a new terminal)
 - Registers the MCP server with Claude Desktop and Claude Code
 
 Registering the scheduled task needs administrator rights, so a UAC prompt appears. Click Yes.
