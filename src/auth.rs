@@ -7,7 +7,10 @@
 //! 비밀번호는 인덱스 DB가 아니라 `auth.json`에 따로 둔다. 인덱스는 스캔이 통째로
 //! 갈아엎고 `forget`으로 지워지는 데이터라 인증 정보와 수명이 다르다.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -92,9 +95,58 @@ pub fn is_configured() -> bool {
     crate::db::data_dir().is_ok_and(|d| is_configured_at(&d))
 }
 
+/// 세션이 살아 있는 시간. 쓰는 동안에는 계속 이만큼씩 밀린다.
+pub const SESSION_SECS: u64 = 86_400;
+
+/// 발급한 세션과 각각의 만료 시각.
+///
+/// 메모리에만 둔다. 서버를 다시 띄우면 전부 무효가 되는데, 단순하고 오히려 안전하다.
+#[derive(Default)]
+pub struct Sessions {
+    live: Mutex<HashMap<String, SystemTime>>,
+}
+
+impl Sessions {
+    /// 새 토큰을 발급한다. 32바이트 난수를 16진수로 적는다.
+    pub fn issue(&self, now: SystemTime) -> Result<String> {
+        let token = random_bytes(32)?
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let mut live = self.live.lock().unwrap();
+        live.insert(token.clone(), now + Duration::from_secs(SESSION_SECS));
+        Ok(token)
+    }
+
+    /// 유효한 토큰인가. 유효하면 만료를 24시간 뒤로 다시 잡는다.
+    ///
+    /// 만료된 것은 이 자리에서 지운다. 따로 청소하는 사람이 없으면 오래 켜 둔
+    /// 컴퓨터에서 죽은 세션이 쌓이기만 한다.
+    pub fn check(&self, token: &str, now: SystemTime) -> bool {
+        if token.is_empty() {
+            return false;
+        }
+        let mut live = self.live.lock().unwrap();
+        live.retain(|_, expires| *expires > now);
+        match live.get_mut(token) {
+            Some(expires) => {
+                *expires = now + Duration::from_secs(SESSION_SECS);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 살아 있는 세션 수. 테스트에서 쓴다.
+    pub fn len(&self) -> usize {
+        self.live.lock().unwrap().len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn 난수는_매번_다르다() {
@@ -146,5 +198,67 @@ mod tests {
         let ha = std::fs::read_to_string(a.path().join("auth.json")).unwrap();
         let hb = std::fs::read_to_string(b.path().join("auth.json")).unwrap();
         assert_ne!(ha, hb);
+    }
+
+    #[test]
+    fn 발급한_토큰은_통과한다() {
+        let s = Sessions::default();
+        let now = SystemTime::UNIX_EPOCH;
+        let t = s.issue(now).unwrap();
+        assert!(s.check(&t, now));
+    }
+
+    #[test]
+    fn 모르는_토큰은_막는다() {
+        let s = Sessions::default();
+        let now = SystemTime::UNIX_EPOCH;
+        s.issue(now).unwrap();
+        assert!(!s.check("아무거나", now));
+        assert!(!s.check("", now));
+    }
+
+    #[test]
+    fn 하루가_지나면_만료된다() {
+        let s = Sessions::default();
+        let now = SystemTime::UNIX_EPOCH;
+        let t = s.issue(now).unwrap();
+        let 하루뒤 = now + Duration::from_secs(SESSION_SECS + 1);
+        assert!(!s.check(&t, 하루뒤));
+    }
+
+    #[test]
+    fn 쓰는_동안_만료가_밀린다() {
+        // 23시간마다 한 번씩 들어오면 사흘이 지나도 살아 있어야 한다.
+        let s = Sessions::default();
+        let mut now = SystemTime::UNIX_EPOCH;
+        let t = s.issue(now).unwrap();
+        for _ in 0..3 {
+            now += Duration::from_secs(23 * 3600);
+            assert!(s.check(&t, now), "23시간 간격이면 연장되어야 한다");
+        }
+        // 그러다 하루를 통째로 쉬면 끊긴다.
+        now += Duration::from_secs(SESSION_SECS + 1);
+        assert!(!s.check(&t, now));
+    }
+
+    #[test]
+    fn 토큰은_매번_다르다() {
+        let s = Sessions::default();
+        let now = SystemTime::UNIX_EPOCH;
+        let a = s.issue(now).unwrap();
+        let b = s.issue(now).unwrap();
+        assert_ne!(a, b);
+        assert!(a.len() >= 32, "토큰이 짧으면 찍어 맞힐 수 있다");
+    }
+
+    #[test]
+    fn 만료된_토큰은_보관하지_않는다() {
+        // 세션이 쌓이기만 하면 오래 켜 둔 컴퓨터에서 메모리가 는다.
+        let s = Sessions::default();
+        let now = SystemTime::UNIX_EPOCH;
+        let t = s.issue(now).unwrap();
+        let 하루뒤 = now + Duration::from_secs(SESSION_SECS + 1);
+        s.check(&t, 하루뒤);
+        assert_eq!(s.len(), 0);
     }
 }
