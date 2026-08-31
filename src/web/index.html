@@ -177,6 +177,16 @@
 
   /* `#where`는 남긴다. 틀렸다는 것과 잠금이 얼마나 남았는지 적을 자리가 필요하고,
      그 줄에는 인덱스 내용이 들어가지 않는다. */
+
+  /* 게이트에서는 안내문이 이 화면의 결론이다. 평소의 한 줄 말줄임(긴 경로용)을
+     풀고, 좁은 화면에서 41칸을 넘으면 줄을 바꿔 끝까지 보여 준다. */
+  body.gate #where {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+    height: auto;
+    min-height: var(--line);
+  }
 </style>
 </head>
 <body>
