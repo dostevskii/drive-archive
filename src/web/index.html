@@ -107,8 +107,15 @@
   #shown { position: relative; pointer-events: none; }
 
   /* 비밀번호 별표. '*' 글리프가 위첨자 높이에 붙어 있어 그대로 두면 줄과 어긋나
-     보인다. relative 이동은 흐름에 영향이 없으므로 커서 칸 계산은 그대로다. */
-  #shown .mask { position: relative; top: 0.18em; }
+     보인다. relative 이동은 흐름에 영향이 없으므로 커서 칸 계산은 그대로다.
+     조합 기능(liga·calt)은 꺼야 한다 — Fira Code 계열은 연속된 별표를 문맥에
+     따라 재배치해서, 켜 두면 글자 수마다 별표 높이가 널뛴다 (iOS에서 실측). */
+  #shown .mask {
+    position: relative;
+    top: 0.18em;
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "calt" 0;
+  }
 
   #cursor {
     position: absolute;
