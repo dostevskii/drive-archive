@@ -475,6 +475,9 @@ function paintList() {
 
     div.addEventListener('mousedown', e => {
       e.preventDefault();   // 검색창의 포커스를 뺏지 않는다
+      // 이미 고른 줄을 다시 누르면 연다. 모바일에서 더블탭은 확대로 먹히기 때문이다.
+      // 데스크톱에서도 같은 줄을 두 번 누르면 열리는데, 자연스러운 동작이라 그대로 둔다.
+      if (state.sel === i) { enter(); return; }
       select(i);
     });
     div.addEventListener('dblclick', e => { e.preventDefault(); enter(); });
