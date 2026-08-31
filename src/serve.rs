@@ -65,6 +65,16 @@ fn session_cookie(token: &str, https: bool) -> String {
     )
 }
 
+/// 로그인 처리 중의 내부 오류. 상세는 밖으로 내보내지 않는다.
+///
+/// 이 자리는 로그인 전 누구나 닿는다. anyhow 오류 문장에는 auth.json의 전체 경로
+/// 같은 내부 사정이 들어 있어, 그대로 내보내면 익명 호출자에게 새어 나간다.
+/// 상세는 stderr로 보내고(직접 띄웠을 때 보인다) 밖으로는 일반 문구만 준다.
+fn internal_error(e: &anyhow::Error) -> (u16, String, Option<String>) {
+    eprintln!("로그인 처리 실패: {e:#}");
+    (500, serde_json::json!({ "error": "internal" }).to_string(), None)
+}
+
 /// 로그인을 처리한다. (상태 코드, 본문, Set-Cookie 한 줄)
 fn api_login(req: &Request, st: &ServeState) -> (u16, String, Option<String>) {
     let ip = req.client_ip();
@@ -89,22 +99,14 @@ fn api_login(req: &Request, st: &ServeState) -> (u16, String, Option<String>) {
                     serde_json::json!({ "ok": true }).to_string(),
                     Some(session_cookie(&token, req.is_https())),
                 ),
-                Err(e) => (
-                    500,
-                    serde_json::json!({ "error": format!("{e:#}") }).to_string(),
-                    None,
-                ),
+                Err(e) => internal_error(&e),
             }
         }
         Ok(false) => {
             st.gate.note_failure(&ip, now);
             (401, serde_json::json!({ "error": "wrong" }).to_string(), None)
         }
-        Err(e) => (
-            500,
-            serde_json::json!({ "error": format!("{e:#}") }).to_string(),
-            None,
-        ),
+        Err(e) => internal_error(&e),
     }
 }
 
@@ -784,5 +786,22 @@ mod tests {
         assert!(needs_auth("/api/drives"));
         assert!(needs_auth("/api/search"));
         assert!(needs_auth("/api/list"));
+    }
+
+    #[test]
+    fn 서버_내부_오류는_상세를_밖으로_내보내지_않는다() {
+        // auth.json이 깨졌을 때의 오류 문장에는 파일 경로가 들어 있다.
+        // 로그인 전 누구나 닿는 자리이므로 밖으로는 일반 문구만 나가야 한다.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("auth.json"), r#"{"hash":"깨진해시"}"#).unwrap();
+        let st = ServeState {
+            dir: dir.path().to_path_buf(),
+            sessions: Default::default(),
+            gate: Default::default(),
+        };
+        let (status, body, cookie) = api_login(&로그인_요청("아무거나비밀번호"), &st);
+        assert_eq!(status, 500);
+        assert!(cookie.is_none());
+        assert_eq!(body, r#"{"error":"internal"}"#);
     }
 }
