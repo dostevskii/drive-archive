@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
+use crate::auth;
 use crate::elevation;
 use crate::task;
 
@@ -182,9 +183,38 @@ pub fn install() -> Result<()> {
     println!("drive-archive 설치를 시작합니다.");
     println!("  실행 파일: {}\n", exe.display());
 
+    // 웹 화면은 밖에서도 들어올 수 있다. 비밀번호 없이 설치를 끝내면 그 상태로
+    // 터널이 붙는다. 그래서 여기서 반드시 받는다.
+    if auth::is_configured() {
+        println!("[1/3] 웹 화면 비밀번호는 이미 설정되어 있습니다.");
+        println!("      바꾸시려면 나중에 `drive-archive passwd`를 실행하세요.");
+    } else {
+        println!("[1/3] 웹 화면에서 쓸 비밀번호를 정해 주세요.");
+        println!("      인덱스에는 파일 이름과 경로가 모두 들어 있습니다. 밖에서 들어오려면");
+        println!("      이 비밀번호가 필요합니다. 입력하는 글자는 화면에 찍히지 않습니다.\n");
+        loop {
+            match crate::prompt_and_set_password() {
+                Ok(()) => break,
+                Err(e) => {
+                    eprintln!("      {e}");
+                    eprintln!("      다시 입력해 주세요.\n");
+                }
+            }
+        }
+        println!("      비밀번호를 저장했습니다.");
+    }
+
     task::setup(&exe)?;
-    println!("[1/2] 자동 인덱싱을 등록했습니다.");
-    println!("      이제 외장하드를 연결하면 인덱스가 자동으로 갱신됩니다.");
+    println!("\n[2/3] 자동 인덱싱과 웹 화면을 등록했습니다.");
+    println!("      외장하드를 연결하면 인덱스가 자동으로 갱신됩니다.");
+    println!("      웹 화면은 로그인할 때 자동으로 뜹니다: http://127.0.0.1:8787/");
+
+    // 등록만 하고 끝내면 다음 로그온까지 웹 화면이 없다. v0.2.1에서 sync를
+    // 등록 직후 깨운 것과 같은 이유로, 여기서 한 번 띄운다.
+    match task::run_serve_now() {
+        Ok(()) => println!("      웹 화면을 지금 띄우도록 요청했습니다."),
+        Err(e) => eprintln!("      웹 화면을 바로 띄우지는 못했습니다 ({e:#}). 다음 로그온부터 뜹니다."),
+    }
 
     // 지금 꽂혀 있는 하드는 마운트 이벤트가 이미 지나갔다. 등록만 하고 끝내면
     // 다음 연결이나 로그온까지 인덱싱되지 않으므로, 여기서 한 번 깨워 준다.
@@ -209,16 +239,18 @@ pub fn install() -> Result<()> {
     }
 
     if registered.is_empty() {
-        println!("\n[2/2] Claude를 찾지 못해 MCP 연결은 건너뛰었습니다.");
+        println!("\n[3/3] Claude를 찾지 못해 MCP 연결은 건너뛰었습니다.");
         println!("      Claude Desktop이나 Claude Code를 설치한 뒤 이 명령을 다시 실행하세요.");
     } else {
-        println!("\n[2/2] {}에 연결했습니다.", registered.join(", "));
+        println!("\n[3/3] {}에 연결했습니다.", registered.join(", "));
         println!("      Claude를 완전히 종료했다가 다시 켜면 적용됩니다.");
         println!("      이제 Claude에게 이렇게 물어볼 수 있습니다:");
         println!("        \"외장하드에서 작년 브랜딩 프로젝트 어디 있어?\"");
     }
 
     println!("\n설치가 끝났습니다. 외장하드를 연결해 보세요.");
+    println!("비밀번호를 바꾸시려면 `drive-archive passwd`를 실행하세요.");
+    println!("밖에서 보시려면 http://127.0.0.1:8787/ 에 터널을 붙이세요 (README 참고).");
     println!("주의: 이 실행 파일을 다른 폴더로 옮기면 `install`을 다시 실행해야 합니다.");
     Ok(())
 }
@@ -234,9 +266,9 @@ pub fn uninstall() -> Result<()> {
     }
 
     if task::remove()? {
-        println!("[1/2] 자동 인덱싱 등록을 해제했습니다.");
+        println!("[1/2] 자동 인덱싱과 웹 화면 등록을 해제했습니다.");
     } else {
-        println!("[1/2] 자동 인덱싱이 등록되어 있지 않았습니다.");
+        println!("[1/2] 등록된 작업이 없었습니다.");
     }
 
     let mut removed = Vec::new();
@@ -254,9 +286,8 @@ pub fn uninstall() -> Result<()> {
         println!("[2/2] {}에서 연결을 지웠습니다.", removed.join(", "));
     }
 
-    let index = crate::db::db_path()?;
-    println!("\n인덱스는 그대로 남겨 두었습니다: {}", index.display());
-    println!("완전히 지우려면 위 폴더를 직접 삭제하세요.");
+    println!("\n인덱스와 웹 비밀번호는 남아 있습니다.");
+    println!("완전히 지우시려면 %LOCALAPPDATA%\\drive-archive 폴더를 삭제하세요.");
     Ok(())
 }
 
