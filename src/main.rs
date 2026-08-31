@@ -3,6 +3,7 @@
 //! 하드가 연결될 때만 잠깐 실행되고 끝나면 완전히 종료된다.
 //! 상주 프로세스가 없으므로 평소 리소스 사용량은 0이다.
 
+mod auth;
 mod db;
 mod elevation;
 mod install;
