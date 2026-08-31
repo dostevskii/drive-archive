@@ -150,6 +150,14 @@ const GLOBAL_LIMIT: u32 = 20;
 /// 잠가 두는 시간.
 const LOCK_SECS: u64 = 60;
 
+/// 전역 카운터가 기억을 지우기까지의 조용한 시간.
+///
+/// 잠금 시간(`LOCK_SECS`)과 같게 두면 "20회 몰아치기 → 잠금 해제까지 대기 → 반복"으로
+/// 카운터가 매 사이클 새것이 되어, 주소를 지어내는 공격자가 전역 잠금을 사실상
+/// 우회한다. 리셋 창을 잠금보다 훨씬 길게 두면 기록이 남아 있는 동안에는 실패
+/// 한 번에 곧바로 다시 잠기므로, 어떤 속도로 두드리든 분당 한 번 수준으로 눌린다.
+const GLOBAL_RESET_SECS: u64 = 600;
+
 /// 로그인 실패를 세어 무차별 대입을 막는다.
 ///
 /// argon2 검증 자체가 느려 초당 수십 회가 한계지만, 밖에 열리는 이상 잠금이 있어야 한다.
@@ -183,7 +191,11 @@ impl Gate {
 
         let mut g = self.global.lock().unwrap();
         let cur = match *g {
-            Some((n, at)) if lock_remaining(at, now).is_some() => n,
+            Some((n, at))
+                if now.duration_since(at).unwrap_or_default().as_secs() <= GLOBAL_RESET_SECS =>
+            {
+                n
+            }
             _ => 0,
         };
         *g = Some((cur + 1, now));
@@ -404,5 +416,25 @@ mod tests {
         }
         let 나중 = now + Duration::from_secs(LOCK_SECS + 1);
         assert_eq!(g.locked_for("처음보는주소", 나중), None);
+    }
+
+    #[test]
+    fn 잠금이_풀려도_전역_기록은_바로_잊히지_않는다() {
+        // "20회 몰아치기 → 잠금이 풀릴 때까지 대기 → 반복"을 하면, 리셋 창이 잠금
+        // 시간과 같을 때 카운터가 매 사이클 새것이 된다. 잠금이 풀린 뒤의 실패
+        // 한 번이 곧바로 다시 잠가야 이 우회가 막힌다.
+        let g = Gate::default();
+        let now = SystemTime::UNIX_EPOCH;
+        for i in 0..GLOBAL_LIMIT {
+            g.note_failure(&format!("10.0.0.{i}"), now);
+        }
+        let 잠금해제후 = now + Duration::from_secs(LOCK_SECS + 1);
+        assert_eq!(g.locked_for("새주소", 잠금해제후), None, "잠금 자체는 풀린다");
+        g.note_failure("또다른주소", 잠금해제후);
+        assert_eq!(
+            g.locked_for("새주소", 잠금해제후),
+            Some(LOCK_SECS),
+            "기록이 남아 있으므로 실패 한 번에 다시 잠긴다"
+        );
     }
 }
