@@ -9,8 +9,26 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+
+use crate::auth::{Gate, Sessions, SESSION_SECS};
+
+/// 세션 쿠키 이름.
+const COOKIE_NAME: &str = "da";
+
+/// 서버가 도는 동안 들고 있는 것.
+///
+/// `dir`을 밖에서 받는 이유는 테스트가 실제 `%LOCALAPPDATA%`를 건드리지 않게
+/// 하기 위해서다. 실행할 때는 `db::data_dir()`이 들어간다.
+pub struct ServeState {
+    pub dir: PathBuf,
+    pub sessions: Sessions,
+    pub gate: Gate,
+}
 
 /// 화면. 한 파일에 HTML·CSS·JS가 모두 들어 있다.
 const INDEX_HTML: &str = include_str!("web/index.html");
@@ -25,13 +43,99 @@ const MAX_LIMIT: usize = 500;
 /// 검색보다 넉넉하게 잡는다.
 const MAX_BROWSE: usize = 2000;
 
+/// 로그인 없이 내려줘도 되는 경로인가.
+fn needs_auth(path: &str) -> bool {
+    !matches!(path, "/" | "/index.html" | "/font.woff2" | "/api/login")
+}
+
+/// 쿠키의 세션이 살아 있는가. 살아 있으면 만료가 24시간 뒤로 밀린다.
+fn authed(req: &Request, st: &ServeState) -> bool {
+    let token = req.cookie(COOKIE_NAME).unwrap_or("");
+    st.sessions.check(token, SystemTime::now())
+}
+
+/// 세션 쿠키 한 줄을 만든다.
+///
+/// `Secure`는 터널을 거쳐 들어온 요청에만 붙인다. 로컬에서 `http://127.0.0.1`로
+/// 직접 볼 때 붙이면 브라우저가 쿠키를 저장하지 않는다.
+fn session_cookie(token: &str, https: bool) -> String {
+    let secure = if https { "; Secure" } else { "" };
+    format!(
+        "Set-Cookie: {COOKIE_NAME}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_SECS}{secure}"
+    )
+}
+
+/// 로그인을 처리한다. (상태 코드, 본문, Set-Cookie 한 줄)
+fn api_login(req: &Request, st: &ServeState) -> (u16, String, Option<String>) {
+    let ip = req.client_ip();
+    let now = SystemTime::now();
+
+    if let Some(left) = st.gate.locked_for(&ip, now) {
+        let body = serde_json::json!({ "error": "locked", "seconds": left }).to_string();
+        return (429, body, None);
+    }
+
+    let password = serde_json::from_slice::<serde_json::Value>(&req.body)
+        .ok()
+        .and_then(|v| v.get("password").and_then(|p| p.as_str()).map(str::to_string))
+        .unwrap_or_default();
+
+    match crate::auth::verify_at(&st.dir, &password) {
+        Ok(true) => {
+            st.gate.note_success(&ip);
+            match st.sessions.issue(now) {
+                Ok(token) => (
+                    200,
+                    serde_json::json!({ "ok": true }).to_string(),
+                    Some(session_cookie(&token, req.is_https())),
+                ),
+                Err(e) => (
+                    500,
+                    serde_json::json!({ "error": format!("{e:#}") }).to_string(),
+                    None,
+                ),
+            }
+        }
+        Ok(false) => {
+            st.gate.note_failure(&ip, now);
+            (401, serde_json::json!({ "error": "wrong" }).to_string(), None)
+        }
+        Err(e) => (
+            500,
+            serde_json::json!({ "error": format!("{e:#}") }).to_string(),
+            None,
+        ),
+    }
+}
+
 /// 서버를 띄우고 요청을 계속 받는다. Ctrl+C로 끝낸다.
 pub fn serve(port: u16, open_browser: bool) -> Result<()> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
-        .with_context(|| format!("{port}번 포트를 열 수 없습니다 (이미 쓰고 있는지 확인하세요)"))?;
+    // 비밀번호가 없으면 뜨지 않는다. 인증 없이 열리는 경로를 남겨 두면
+    // 언젠가 그 상태로 터널이 붙는다. 인덱스에는 파일 이름과 경로가 통째로 있다.
+    if !crate::auth::is_configured() {
+        // 로그온 작업은 S4U로 돌아 stderr가 아무에게도 보이지 않는다.
+        // 왜 죽었는지를 로그에 남겨야 사람이 알 수 있다.
+        crate::sync::log("serve: 비밀번호가 설정되어 있지 않아 뜨지 않음");
+        anyhow::bail!(
+            "웹 화면 비밀번호가 설정되어 있지 않습니다.\n\
+             `drive-archive passwd`로 먼저 설정하세요."
+        );
+    }
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(|e| {
+        crate::sync::log(&format!("serve: {port}번 포트를 열지 못함 ({e})"));
+        anyhow::anyhow!("{port}번 포트를 열 수 없습니다 (이미 쓰고 있는지 확인하세요): {e}")
+    })?;
+
+    let state = Arc::new(ServeState {
+        dir: crate::db::data_dir()?,
+        sessions: Default::default(),
+        gate: Default::default(),
+    });
 
     let url = format!("http://127.0.0.1:{port}/");
     println!("drive-archive 웹 화면: {url}");
+    println!("밖에서 보시려면 이 주소로 터널을 붙이세요.");
     println!("끝내려면 Ctrl+C를 누르세요.");
 
     if open_browser {
@@ -42,10 +146,9 @@ pub fn serve(port: u16, open_browser: bool) -> Result<()> {
 
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        // 브라우저는 페이지·폰트·API를 동시에 요청한다. 요청마다 스레드를 띄워
-        // 하나가 느려도 나머지가 기다리지 않게 한다.
+        let st = Arc::clone(&state);
         std::thread::spawn(move || {
-            if let Err(e) = handle(stream) {
+            if let Err(e) = handle(stream, &st) {
                 eprintln!("요청 처리 실패: {e:#}");
             }
         });
@@ -54,7 +157,7 @@ pub fn serve(port: u16, open_browser: bool) -> Result<()> {
 }
 
 /// 연결 하나를 처리한다.
-fn handle(mut stream: TcpStream) -> Result<()> {
+fn handle(mut stream: TcpStream, st: &ServeState) -> Result<()> {
     let peer = stream
         .peer_addr()
         .map(|a| a.ip().to_string())
@@ -62,10 +165,38 @@ fn handle(mut stream: TcpStream) -> Result<()> {
     let Some(req) = read_request(&mut stream, peer)? else {
         return Ok(());
     };
+
+    if req.path == "/api/login" && req.method == "POST" {
+        let (status, body, cookie) = api_login(&req, st);
+        let extra: Vec<String> = cookie.into_iter().collect();
+        return respond_with(
+            &mut stream,
+            status,
+            "application/json; charset=utf-8",
+            body.as_bytes(),
+            &extra,
+        );
+    }
+
     if req.method != "GET" {
         return respond(&mut stream, 404, "text/plain; charset=utf-8", b"not found");
     }
+
+    // 인덱스를 건드리는 경로는 세션이 있어야 한다. 통과하면 그 자리에서 만료가
+    // 24시간 뒤로 밀리므로, 갱신된 쿠키를 응답에 같이 실어 보낸다.
+    let mut extra: Vec<String> = Vec::new();
+    if needs_auth(&req.path) {
+        if !authed(&req, st) {
+            let body = serde_json::json!({ "error": "unauthorized" }).to_string();
+            return respond(&mut stream, 401, "application/json; charset=utf-8", body.as_bytes());
+        }
+        if let Some(token) = req.cookie(COOKIE_NAME) {
+            extra.push(session_cookie(token, req.is_https()));
+        }
+    }
+
     let (path, query) = (req.path.as_str(), req.query.as_str());
+    let json = "application/json; charset=utf-8";
 
     match path {
         "/" | "/index.html" => {
@@ -73,15 +204,15 @@ fn handle(mut stream: TcpStream) -> Result<()> {
         }
         "/font.woff2" => respond(&mut stream, 200, "font/woff2", FONT_WOFF2),
         "/api/drives" => match api_drives() {
-            Ok(body) => respond(&mut stream, 200, "application/json; charset=utf-8", body.as_bytes()),
+            Ok(body) => respond_with(&mut stream, 200, json, body.as_bytes(), &extra),
             Err(e) => respond_error(&mut stream, &e),
         },
         "/api/search" => match api_search(query) {
-            Ok(body) => respond(&mut stream, 200, "application/json; charset=utf-8", body.as_bytes()),
+            Ok(body) => respond_with(&mut stream, 200, json, body.as_bytes(), &extra),
             Err(e) => respond_error(&mut stream, &e),
         },
         "/api/list" => match api_list(query) {
-            Ok(body) => respond(&mut stream, 200, "application/json; charset=utf-8", body.as_bytes()),
+            Ok(body) => respond_with(&mut stream, 200, json, body.as_bytes(), &extra),
             Err(e) => respond_error(&mut stream, &e),
         },
         _ => respond(&mut stream, 404, "text/plain; charset=utf-8", b"not found"),
@@ -328,19 +459,36 @@ fn percent_decode(s: &str) -> String {
 /// keep-alive를 쓰지 않는다. 연결을 닫으면 브라우저가 알아서 다시 여는데,
 /// 로컬에서는 그 비용이 없는 것이나 마찬가지이고 서버 쪽이 훨씬 단순해진다.
 fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> Result<()> {
+    respond_with(stream, status, content_type, body, &[])
+}
+
+fn respond_with(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra: &[String],
+) -> Result<()> {
     let reason = match status {
         200 => "OK",
+        401 => "Unauthorized",
         404 => "Not Found",
+        429 => "Too Many Requests",
         _ => "Internal Server Error",
     };
-    let head = format!(
+    let mut head = format!(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Cache-Control: no-store\r\n\
-         Connection: close\r\n\r\n",
+         Connection: close\r\n",
         body.len()
     );
+    for line in extra {
+        head.push_str(line);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
     stream.flush()?;
@@ -398,13 +546,18 @@ mod tests {
     /// 실제로 포트를 열어 요청-응답이 오가는지 확인한다.
     #[test]
     fn 페이지와_폰트를_내려준다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let st = std::sync::Arc::new(st);
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        std::thread::spawn(move || {
-            for s in listener.incoming().take(3) {
-                let _ = handle(s.unwrap());
-            }
-        });
+        {
+            let st = std::sync::Arc::clone(&st);
+            std::thread::spawn(move || {
+                for s in listener.incoming().take(3) {
+                    let _ = handle(s.unwrap(), &st);
+                }
+            });
+        }
 
         let get = |path: &str| -> String {
             let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
@@ -421,8 +574,9 @@ mod tests {
         assert!(font.starts_with("HTTP/1.1 200 OK"));
         assert!(font.contains("font/woff2"));
 
+        // 로그인 전에는 모르는 경로도 401이다.
         let missing = get("/없는경로");
-        assert!(missing.starts_with("HTTP/1.1 404"));
+        assert!(missing.starts_with("HTTP/1.1 401"));
     }
 
     /// 테스트용 요청을 하나 만든다.
@@ -523,5 +677,112 @@ mod tests {
         assert_eq!(r.client_ip(), "9.9.9.9", "맨 앞이 원래 보낸 쪽이다");
         let r = req("GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
         assert_eq!(r.client_ip(), "1.2.3.4");
+    }
+
+    /// 비밀번호가 설정된 임시 상태를 만든다.
+    fn 준비된_상태(pw: &str) -> (tempfile::TempDir, ServeState) {
+        let dir = tempfile::tempdir().unwrap();
+        crate::auth::set_password_at(dir.path(), pw).unwrap();
+        let st = ServeState {
+            dir: dir.path().to_path_buf(),
+            sessions: Default::default(),
+            gate: Default::default(),
+        };
+        (dir, st)
+    }
+
+    fn 로그인_요청(pw: &str) -> Request {
+        let body = serde_json::json!({ "password": pw }).to_string();
+        let raw = format!(
+            "POST /api/login HTTP/1.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        req(&raw).unwrap()
+    }
+
+    #[test]
+    fn 맞는_비밀번호는_쿠키를_받는다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let (status, _body, cookie) = api_login(&로그인_요청("열려라참깨입니다"), &st);
+        assert_eq!(status, 200);
+        let cookie = cookie.expect("쿠키가 있어야 한다");
+        assert!(cookie.contains("da="));
+        assert!(cookie.contains("HttpOnly"), "스크립트가 읽으면 안 된다");
+        assert!(cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("Max-Age=86400"));
+    }
+
+    #[test]
+    fn 틀린_비밀번호는_막힌다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let (status, _body, cookie) = api_login(&로그인_요청("닫혀라참깨입니다"), &st);
+        assert_eq!(status, 401);
+        assert!(cookie.is_none());
+    }
+
+    #[test]
+    fn 다섯_번_틀리면_잠긴다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        for _ in 0..5 {
+            api_login(&로그인_요청("틀린비밀번호입니다"), &st);
+        }
+        // 이제는 맞는 비밀번호를 넣어도 잠금이 먼저다.
+        let (status, body, _) = api_login(&로그인_요청("열려라참깨입니다"), &st);
+        assert_eq!(status, 429);
+        assert!(body.contains("locked"), "{body}");
+    }
+
+    #[test]
+    fn 평문_접속에는_시큐어를_붙이지_않는다() {
+        // http://127.0.0.1로 직접 볼 때 Secure를 붙이면 쿠키가 저장되지 않는다.
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let (_, _, cookie) = api_login(&로그인_요청("열려라참깨입니다"), &st);
+        assert!(!cookie.unwrap().contains("Secure"));
+    }
+
+    #[test]
+    fn 터널을_거친_접속에는_시큐어를_붙인다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let body = serde_json::json!({ "password": "열려라참깨입니다" }).to_string();
+        let raw = format!(
+            "POST /api/login HTTP/1.1\r\nX-Forwarded-Proto: https\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let (_, _, cookie) = api_login(&req(&raw).unwrap(), &st);
+        assert!(cookie.unwrap().contains("Secure"));
+    }
+
+    #[test]
+    fn 세션_없이는_인덱스를_볼_수_없다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let r = req("GET /api/drives HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert!(!authed(&r, &st));
+    }
+
+    #[test]
+    fn 발급받은_쿠키로는_볼_수_있다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let (_, _, cookie) = api_login(&로그인_요청("열려라참깨입니다"), &st);
+        let token = cookie
+            .unwrap()
+            .trim_start_matches("Set-Cookie: da=")
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let raw = format!("GET /api/drives HTTP/1.1\r\nCookie: da={token}\r\n\r\n");
+        assert!(authed(&req(&raw).unwrap(), &st));
+    }
+
+    #[test]
+    fn 화면과_폰트는_로그인_없이_내려준다() {
+        // 게이트 화면 자체가 이 HTML이다. 여기에는 인덱스 내용이 들어 있지 않다.
+        assert!(!needs_auth("/"));
+        assert!(!needs_auth("/index.html"));
+        assert!(!needs_auth("/font.woff2"));
+        assert!(!needs_auth("/api/login"));
+        assert!(needs_auth("/api/drives"));
+        assert!(needs_auth("/api/search"));
+        assert!(needs_auth("/api/list"));
     }
 }
