@@ -326,6 +326,10 @@ function lineH() {
 
 /** 목록 높이를 줄 높이의 정수배로 고정한다. 마지막 줄이 반만 보이지 않게. */
 function fitList() {
+  // 게이트에서는 목록이 display:none이라 높이가 0으로 재지고, Math.max(1, 0)이
+  // 1줄로 굳는다. 게이트 중의 resize(iOS 키보드 등)가 이 값을 남기면 로그인
+  // 뒤에도 한 줄만 보인다. 게이트에서는 재지 않고, 나갈 때 다시 잰다.
+  if (state.gate) return;
   const line = lineH();
   el.list.style.flex = '1 1 auto';
   el.list.style.height = '';
@@ -406,6 +410,7 @@ function leaveGate() {
   document.body.classList.remove('gate');
   el.keeper.value = '';
   el.where.textContent = '';
+  fitList();   // 게이트 동안 재지 못한 목록 높이를 이제 잰다
   paintSearch();
   loadDrives();
 }
