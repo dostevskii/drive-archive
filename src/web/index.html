@@ -45,10 +45,7 @@
     flex-direction: column;
     overflow: hidden;
     -webkit-font-smoothing: antialiased;
-    /* 21px는 18px 글자에 대한 값이므로 비율은 7/6이다. 글자 크기가 화면
-       폭에 따라 줄어도 줄 높이가 따라오려면 em이어야 하고, em은 이 요소
-       자신의 글자 크기를 기준으로 하므로 :root가 아니라 body에 둔다. */
-    --line: 1.1667em;
+    --line: 1.1667em;   /* 21px / 18px. 글자 크기가 줄면 줄 높이도 따라 준다 */
   }
 
   /* 화면 전체가 41칸 폭을 넘지 않는다. TUI 한 컬럼처럼 보이게 하는 핵심이다. */
