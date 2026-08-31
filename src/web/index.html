@@ -106,6 +106,10 @@
 
   #shown { position: relative; pointer-events: none; }
 
+  /* 비밀번호 별표. '*' 글리프가 위첨자 높이에 붙어 있어 그대로 두면 줄과 어긋나
+     보인다. relative 이동은 흐름에 영향이 없으므로 커서 칸 계산은 그대로다. */
+  #shown .mask { position: relative; top: 0.18em; }
+
   #cursor {
     position: absolute;
     top: 0;
@@ -227,6 +231,10 @@ const SIZE_W = 9;                      // 탐색 화면의 크기 칸
 const UP_ROW = { name: '..', is_dir: true, up: true };
 
 const SEP = '\\';                      // 인덱스에 저장된 경로 구분자
+
+// 터치 기기인가. 데스크톱과 달리 포커스가 곧 가상 키보드라, 포커스를 함부로
+// 돌려주면 목록을 만질 때마다 화면 반이 키보드에 가려진다.
+const COARSE = window.matchMedia('(pointer: coarse)').matches;
 
 const el = {
   clock:  document.getElementById('clock'),
@@ -352,7 +360,17 @@ function shownValue(s) {
 
 function paintSearch() {
   const value = el.keeper.value;
-  el.shown.textContent = prompt_() + shownValue(value);
+  if (state.gate) {
+    // '*' 글리프는 글꼴에서 위첨자 높이에 붙어 있어 줄 가운데와 어긋나 보인다.
+    // 흐름(칸 수)은 그대로 두고 그리기만 살짝 내려 맞춘다 (.mask 규칙).
+    el.shown.textContent = prompt_();
+    const m = document.createElement('span');
+    m.className = 'mask';
+    m.textContent = shownValue(value);
+    el.shown.appendChild(m);
+  } else {
+    el.shown.textContent = prompt_() + value;
+  }
 
   // 커서는 입력 지점 위에 놓는다. IME 조합 중에도 selectionStart가 따라온다.
   const at = el.keeper.selectionStart ?? value.length;
@@ -503,6 +521,9 @@ function paintList() {
 
     div.addEventListener('mousedown', e => {
       e.preventDefault();   // 검색창의 포커스를 뺏지 않는다
+      // 터치 기기에서는 반대로 포커스를 뗀다. 목록을 만졌는데 가상 키보드가
+      // 뜨면 화면 반이 가려진다 — 키보드는 검색줄을 탭했을 때만 뜬다.
+      if (COARSE) el.keeper.blur();
       // 이미 고른 줄을 다시 누르면 연다. 모바일에서 더블탭은 확대로 먹히기 때문이다.
       // 데스크톱에서도 같은 줄을 두 번 누르면 열리는데, 자연스러운 동작이라 그대로 둔다.
       if (state.sel === i) { enter(); return; }
@@ -806,7 +827,9 @@ document.addEventListener('keydown', e => {
 });
 
 // 검색창 밖을 눌러도 입력이 이어지도록 포커스를 되돌린다.
-document.addEventListener('mousedown', () => { if (state.insert) el.keeper.focus(); });
+// 터치 기기에서는 하지 않는다 — 포커스가 곧 가상 키보드라, 되돌리면 아무 데나
+// 탭할 때마다 키보드가 올라온다. 검색줄 탭은 setInsert(true)가 따로 받는다.
+document.addEventListener('mousedown', () => { if (state.insert && !COARSE) el.keeper.focus(); });
 
 /* ── 시작 ──────────────────────────────────────────── */
 

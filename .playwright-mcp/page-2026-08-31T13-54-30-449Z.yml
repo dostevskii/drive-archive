@@ -1,0 +1,6 @@
+- generic [ref=e1]:
+  - generic [ref=e2]: DRIVE-ARCHIVE
+  - generic [ref=e4]: ABCDEFGHIJKLMNOPQRSTU VWXYZ0123456789&-:.+= ()[]<>/\,--:--10:54PM
+  - generic [ref=e6]:
+    - generic: "PASSWORD:"
+    - textbox [active] [ref=e8]
