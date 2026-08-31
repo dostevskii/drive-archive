@@ -479,8 +479,11 @@ function paintList() {
       // 데스크톱에서도 같은 줄을 두 번 누르면 열리는데, 자연스러운 동작이라 그대로 둔다.
       if (state.sel === i) { enter(); return; }
       select(i);
+      // 더블클릭 리스너는 따로 두지 않는다. 두 번째 mousedown이 이미 열기라서
+      // 더블클릭도 그 경로로 열린다. 리스너를 따로 두면 같은 클릭의 dblclick이 —
+      // 동기 이동으로 화면이 이미 바뀐 뒤 — 그 자리의 다른 줄에 새로 붙은
+      // 리스너에서 한 번 더 발화해, ..를 더블클릭했는데 엉뚱한 하드가 열린다.
     });
-    div.addEventListener('dblclick', e => { e.preventDefault(); enter(); });
     el.list.appendChild(div);
   });
 }
