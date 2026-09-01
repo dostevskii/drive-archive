@@ -16,9 +16,9 @@ pub const SERVE_TASK: &str = "drive-archive serve";
 /// 예: `볼륨 J: (\Device\HarddiskVolume27) 정상입니다. 작업이 필요 없습니다.`
 /// 섀도 복사본에서도 발생하지만, `sync`가 USB 볼륨만 걸러내므로 문제없다.
 ///
-/// 프로바이더 이름은 `Ntfs`지만 NTFS 전용이 아니다. exFAT 볼륨에서도 이 이벤트가
-/// 발생하는 것을 확인했다. 다만 모든 파일 시스템에서 발생한다고 보장할 수는 없어,
-/// 로그온 트리거를 함께 걸어 놓친 연결을 메운다.
+/// 사실상 NTFS 전용이다. v0.2.0에서는 exFAT에서도 나는 것으로 관찰했으나
+/// 2026-09-01 실측으로 뒤집혔다 — exFAT 하드 두 개를 꽂아도 나지 않았다.
+/// 그래서 아래 `DEVICE_EVENT_QUERY`(파일 시스템 무관)를 함께 듣는다.
 const MOUNT_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Path=&quot;System&quot;&gt;&lt;Select Path=&quot;System&quot;&gt;*[System[Provider[@Name='Microsoft-Windows-Ntfs'] and EventID=98]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;";
 
 /// 볼륨이 붙을 때의 장치 구성 이벤트 (Kernel-PnP 400).
