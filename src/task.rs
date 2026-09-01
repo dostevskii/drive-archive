@@ -21,6 +21,14 @@ pub const SERVE_TASK: &str = "drive-archive serve";
 /// 로그온 트리거를 함께 걸어 놓친 연결을 메운다.
 const MOUNT_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Path=&quot;System&quot;&gt;&lt;Select Path=&quot;System&quot;&gt;*[System[Provider[@Name='Microsoft-Windows-Ntfs'] and EventID=98]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;";
 
+/// 볼륨이 붙을 때의 장치 구성 이벤트 (Kernel-PnP 400).
+///
+/// exFAT 하드는 Ntfs 이벤트 98을 내지 않는다 (2026-09-01 실측 — v0.2.0의 관찰이
+/// 뒤집혔다). 이 이벤트는 파일 시스템을 가리지 않는 대신 장치 종류도 가리지
+/// 않으므로, 실행된 쪽이 DeviceInstanceId를 보고 볼륨(`STORAGE\VOLUME`)이
+/// 아니면 물러난다.
+const DEVICE_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Path=&quot;Microsoft-Windows-Kernel-PnP/Configuration&quot;&gt;&lt;Select Path=&quot;Microsoft-Windows-Kernel-PnP/Configuration&quot;&gt;*[System[Provider[@Name='Microsoft-Windows-Kernel-PnP'] and EventID=400]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;";
+
 /// 작업 정의 XML을 만든다.
 ///
 /// `LogonType`이 `S4U`인 이유는 콘솔 창 때문이다. `InteractiveToken`으로 두면 스케줄러가
@@ -51,6 +59,14 @@ fn task_xml(exe: &Path) -> Result<String> {
       <Delay>PT15S</Delay>
       <ValueQueries>
         <Value name="DriveName">Event/EventData/Data[@Name='DriveName']</Value>
+      </ValueQueries>
+    </EventTrigger>
+    <EventTrigger>
+      <Enabled>true</Enabled>
+      <Subscription>{DEVICE_EVENT_QUERY}</Subscription>
+      <Delay>PT15S</Delay>
+      <ValueQueries>
+        <Value name="DriveName">Event/EventData/Data[@Name='DeviceInstanceId']</Value>
       </ValueQueries>
     </EventTrigger>
     <LogonTrigger>
@@ -310,6 +326,17 @@ mod tests {
         let xml = task_xml(Path::new("x.exe")).unwrap();
         assert!(xml.contains("<LogonType>S4U</LogonType>"));
         assert!(!xml.contains("InteractiveToken"));
+    }
+
+    #[test]
+    fn 장치_이벤트_트리거가_함께_들어간다() {
+        // exFAT 하드는 Ntfs 이벤트 98을 내지 않아, 파일 시스템을 가리지 않는
+        // 장치 구성 이벤트를 함께 들어야 모든 포맷이 자동으로 인덱싱된다.
+        let xml = task_xml(Path::new(r"C:\bin\drive-archive.exe")).unwrap();
+        assert_eq!(xml.matches("<EventTrigger>").count(), 2, "{xml}");
+        assert!(xml.contains("Kernel-PnP"));
+        assert!(xml.contains("EventID=400"));
+        assert!(xml.contains("DeviceInstanceId"));
     }
 
     #[test]
