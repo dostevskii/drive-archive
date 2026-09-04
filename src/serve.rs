@@ -36,6 +36,10 @@ const INDEX_HTML: &str = include_str!("web/index.html");
 /// 화면에 쓰는 고정폭 폰트 (FiraD2 Regular).
 const FONT_WOFF2: &[u8] = include_bytes!("../assets/FiraD2-Regular.woff2");
 
+/// 브라우저 탭 아이콘(32×32)과 iOS 홈 화면 아이콘(180×180). 피그마 시안을 그대로 내보낸 PNG.
+const FAVICON_PNG: &[u8] = include_bytes!("../assets/favicon-32x32.png");
+const TOUCH_ICON_PNG: &[u8] = include_bytes!("../assets/apple-touch-icon.png");
+
 /// 검색 결과 상한. 화면이 감당할 수 있는 만큼만 보낸다.
 const MAX_LIMIT: usize = 500;
 
@@ -45,7 +49,15 @@ const MAX_BROWSE: usize = 2000;
 
 /// 로그인 없이 내려줘도 되는 경로인가.
 fn needs_auth(path: &str) -> bool {
-    !matches!(path, "/" | "/index.html" | "/font.woff2" | "/api/login")
+    !matches!(
+        path,
+        "/" | "/index.html"
+            | "/font.woff2"
+            | "/favicon-32x32.png"
+            | "/favicon.ico"
+            | "/apple-touch-icon.png"
+            | "/api/login"
+    )
 }
 
 /// 쿠키의 세션이 살아 있는가. 살아 있으면 만료가 24시간 뒤로 밀린다.
@@ -205,6 +217,9 @@ fn handle(mut stream: TcpStream, st: &ServeState) -> Result<()> {
             respond(&mut stream, 200, "text/html; charset=utf-8", INDEX_HTML.as_bytes())
         }
         "/font.woff2" => respond(&mut stream, 200, "font/woff2", FONT_WOFF2),
+        // 링크 태그가 없는 요청(북마크 등)은 /favicon.ico를 찾으므로 같은 PNG를 내준다.
+        "/favicon-32x32.png" | "/favicon.ico" => respond(&mut stream, 200, "image/png", FAVICON_PNG),
+        "/apple-touch-icon.png" => respond(&mut stream, 200, "image/png", TOUCH_ICON_PNG),
         "/api/drives" => match api_drives() {
             Ok(body) => respond_with(&mut stream, 200, json, body.as_bytes(), &extra),
             Err(e) => respond_error(&mut stream, &e),
@@ -555,7 +570,7 @@ mod tests {
         {
             let st = std::sync::Arc::clone(&st);
             std::thread::spawn(move || {
-                for s in listener.incoming().take(3) {
+                for s in listener.incoming().take(6) {
                     let _ = handle(s.unwrap(), &st);
                 }
             });
@@ -575,6 +590,12 @@ mod tests {
         let font = get("/font.woff2");
         assert!(font.starts_with("HTTP/1.1 200 OK"));
         assert!(font.contains("font/woff2"));
+
+        for path in ["/favicon-32x32.png", "/favicon.ico", "/apple-touch-icon.png"] {
+            let icon = get(path);
+            assert!(icon.starts_with("HTTP/1.1 200 OK"), "{path}");
+            assert!(icon.contains("image/png"), "{path}");
+        }
 
         // 로그인 전에는 모르는 경로도 401이다.
         let missing = get("/없는경로");
@@ -777,11 +798,14 @@ mod tests {
     }
 
     #[test]
-    fn 화면과_폰트는_로그인_없이_내려준다() {
+    fn 화면과_폰트와_아이콘은_로그인_없이_내려준다() {
         // 게이트 화면 자체가 이 HTML이다. 여기에는 인덱스 내용이 들어 있지 않다.
         assert!(!needs_auth("/"));
         assert!(!needs_auth("/index.html"));
         assert!(!needs_auth("/font.woff2"));
+        assert!(!needs_auth("/favicon-32x32.png"));
+        assert!(!needs_auth("/favicon.ico"));
+        assert!(!needs_auth("/apple-touch-icon.png"));
         assert!(!needs_auth("/api/login"));
         assert!(needs_auth("/api/drives"));
         assert!(needs_auth("/api/search"));
