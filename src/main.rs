@@ -37,7 +37,8 @@ enum Cmd {
         /// Rescan drives even if just scanned
         #[arg(long)]
         force: bool,
-        /// Check only this drive (e.g. L:). If omitted, checks all connected drives
+        /// Check only this drive (e.g. L:) or the volumes on this disk number (e.g. 8).
+        /// If omitted, checks all connected drives
         #[arg(long)]
         drive: Option<String>,
     },
@@ -159,52 +160,24 @@ fn parse_drive_letter(raw: &str) -> Option<char> {
     }
 }
 
-/// 스케줄러가 넘긴 `--drive` 값의 세 갈래.
-enum DriveArg {
-    /// NTFS 마운트 이벤트가 준 드라이브 문자. 그 하드만 확인한다.
-    Letter(char),
-    /// 어느 볼륨인지 모르거나(로그온·수동 실행) 볼륨이 붙었다(장치 이벤트).
-    /// 연결된 하드를 전부 확인한다.
-    CheckAll,
-    /// 저장소가 아닌 장치 이벤트(마우스·키보드 등). 디스크를 건드리지 않고 물러난다.
-    NotStorage,
-}
-
-/// 작업 스케줄러가 넘겨준 `--drive` 값을 분류한다.
+/// 작업 스케줄러가 넘겨준 `--drive` 값을 읽는다.
 ///
-/// NTFS 마운트 이벤트는 `L:` 같은 드라이브 문자를 준다. 로그온 트리거나
-/// `schtasks /Run`은 값 쿼리가 없어 `$(DriveName)`이 그대로, 또는 빈 값이 온다.
-/// 장치 구성 이벤트(Kernel-PnP 400)는 장치 식별자를 주는데, exFAT처럼 Ntfs
-/// 이벤트 98이 나지 않는 하드를 잡으려고 듣는 것이라 `STORAGE\VOLUME`이면
-/// 전부 확인하고, 그 밖의 장치면 물러난다 — 마우스를 꽂았다고 하드를 다시
-/// 훑으면 안 된다.
-fn classify_drive_arg(raw: &str) -> DriveArg {
+/// NTFS 마운트 이벤트는 `L:` 같은 드라이브 문자를, 디스크 도착 이벤트
+/// (Partition/Diagnostic 1006)는 `8` 같은 디스크 번호를 준다. 로그온 트리거나
+/// `schtasks /Run`은 값 쿼리가 없어 `$(DriveName)`이 그대로, 또는 빈 값이 오는데,
+/// 그런 값은 읽히지 않는 다른 값과 함께 `None` — 연결된 하드를 전부 확인한다.
+fn classify_drive_arg(raw: &str) -> Option<sync::Only> {
     if let Some(letter) = parse_drive_letter(raw) {
-        return DriveArg::Letter(letter);
+        return Some(sync::Only::Letter(letter));
     }
-    let t = raw.trim();
-    if t.is_empty() || t == "$(DriveName)" {
-        return DriveArg::CheckAll;
-    }
-    if t.get(..14).is_some_and(|p| p.eq_ignore_ascii_case(r"STORAGE\VOLUME")) {
-        return DriveArg::CheckAll;
-    }
-    DriveArg::NotStorage
+    raw.trim().parse().ok().map(sync::Only::Disk)
 }
 
 fn cmd_sync(force: bool, drive: Option<&str>) -> Result<()> {
     // 스케줄러가 깨웠다면 이 시점에 콘솔 창이 화면에 떠 있다. 먼저 치운다.
     sync::hide_console_if_ours();
 
-    // 저장소가 아닌 장치 이벤트면 아무것도 하지 않는다. 잠금 파일도 로그도
-    // 건드리지 않는다 — 장치를 꽂을 때마다 흔적이 쌓이면 그게 소음이다.
-    let arg = match drive {
-        Some(raw) => classify_drive_arg(raw),
-        None => DriveArg::CheckAll,
-    };
-    if matches!(arg, DriveArg::NotStorage) {
-        return Ok(());
-    }
+    let only = drive.and_then(classify_drive_arg);
 
     let Some(_lock) = sync::InstanceLock::acquire()? else {
         // 이미 다른 인스턴스가 스캔 중이다. 조용히 물러난다.
@@ -213,14 +186,11 @@ fn cmd_sync(force: bool, drive: Option<&str>) -> Result<()> {
     };
     sync::lower_priority();
 
-    let only = match arg {
-        DriveArg::Letter(letter) => Some(letter),
-        _ => None,
-    };
     let outcomes = sync::sync_all(force, only)?;
     if outcomes.is_empty() {
         match only {
-            Some(letter) => println!("Drive {letter}: is not indexed."),
+            Some(sync::Only::Letter(letter)) => println!("Drive {letter}: is not indexed."),
+            Some(sync::Only::Disk(n)) => println!("Disk {n}: has no indexed volume."),
             None => println!("No external drives connected."),
         }
         return Ok(());
@@ -604,28 +574,24 @@ mod tests {
 
     #[test]
     fn 문자와_미치환_값의_분류는_종전과_같다() {
-        assert!(matches!(classify_drive_arg("L:"), DriveArg::Letter('L')));
-        assert!(matches!(classify_drive_arg("$(DriveName)"), DriveArg::CheckAll));
-        assert!(matches!(classify_drive_arg(""), DriveArg::CheckAll));
+        assert_eq!(classify_drive_arg("L:"), Some(sync::Only::Letter('L')));
+        assert_eq!(classify_drive_arg("$(DriveName)"), None);
+        assert_eq!(classify_drive_arg(""), None);
     }
 
     #[test]
-    fn 볼륨_장치_이벤트는_전부_확인한다() {
-        // exFAT 하드는 Ntfs 이벤트 98을 내지 않는다 (2026-09-01 실측). 볼륨이
-        // 붙은 장치 이벤트라면 파일 시스템과 무관하게 확인해야 한다.
-        assert!(matches!(
-            classify_drive_arg(r"STORAGE\Volume\{6b2f-abcd}#0000000000100000"),
-            DriveArg::CheckAll
-        ));
-        assert!(matches!(classify_drive_arg(r"storage\volume\x"), DriveArg::CheckAll));
+    fn 디스크_번호는_그_디스크의_볼륨만_본다() {
+        // 디스크 도착 이벤트(Partition/Diagnostic 1006)는 드라이브 문자 대신
+        // 디스크 번호를 준다. exFAT처럼 마운트 이벤트가 없는 하드도 이 경로로 잡는다.
+        assert_eq!(classify_drive_arg("8"), Some(sync::Only::Disk(8)));
+        assert_eq!(classify_drive_arg(" 12 "), Some(sync::Only::Disk(12)));
     }
 
     #[test]
-    fn 저장소가_아닌_장치_이벤트는_물러난다() {
-        // 마우스를 꽂았다고 연결된 하드를 전부 다시 훑으면 안 된다.
-        assert!(matches!(classify_drive_arg(r"HID\VID_046D&PID_C52B"), DriveArg::NotStorage));
-        assert!(matches!(classify_drive_arg(r"USB\VID_0781&PID_5581\5583"), DriveArg::NotStorage));
-        assert!(matches!(classify_drive_arg("12"), DriveArg::NotStorage));
+    fn 읽히지_않는_값은_전부_확인한다() {
+        // 모르는 값 때문에 인덱싱을 거르지는 않는다. 로그온 트리거와 같은 경로다.
+        assert_eq!(classify_drive_arg(r"HID\VID_046D&PID_C52B"), None);
+        assert_eq!(classify_drive_arg("-3"), None);
     }
 
     fn hit(label: &str, serial: &str) -> db::SearchHit {

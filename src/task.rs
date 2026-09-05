@@ -1,7 +1,7 @@
 //! 작업 스케줄러에 이벤트 트리거를 등록한다.
 //!
-//! 상주 프로그램을 띄우는 대신, Windows가 볼륨 마운트 이벤트를 기록했을 때만
-//! 스케줄러가 이 프로그램을 깨운다. 그래서 평소 리소스 사용량이 0이다.
+//! 상주 프로그램을 띄우는 대신, Windows가 볼륨 마운트·디스크 도착 이벤트를 기록했을
+//! 때만 스케줄러가 이 프로그램을 깨운다. 그래서 평소 리소스 사용량이 0이다.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -18,16 +18,19 @@ pub const SERVE_TASK: &str = "drive-archive serve";
 ///
 /// 사실상 NTFS 전용이다. v0.2.0에서는 exFAT에서도 나는 것으로 관찰했으나
 /// 2026-09-01 실측으로 뒤집혔다 — exFAT 하드 두 개를 꽂아도 나지 않았다.
-/// 그래서 아래 `DEVICE_EVENT_QUERY`(파일 시스템 무관)를 함께 듣는다.
+/// 그래서 아래 `DISK_EVENT_QUERY`(디스크 도착, 파일 시스템 무관)를 함께 듣는다.
 const MOUNT_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Path=&quot;System&quot;&gt;&lt;Select Path=&quot;System&quot;&gt;*[System[Provider[@Name='Microsoft-Windows-Ntfs'] and EventID=98]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;";
 
-/// 볼륨이 붙을 때의 장치 구성 이벤트 (Kernel-PnP 400).
+/// USB 디스크가 도착할 때 파티션 관리자가 남기는 이벤트 (Partition/Diagnostic 1006).
 ///
 /// exFAT 하드는 Ntfs 이벤트 98을 내지 않는다 (2026-09-01 실측 — v0.2.0의 관찰이
-/// 뒤집혔다). 이 이벤트는 파일 시스템을 가리지 않는 대신 장치 종류도 가리지
-/// 않으므로, 실행된 쪽이 DeviceInstanceId를 보고 볼륨(`STORAGE\VOLUME`)이
-/// 아니면 물러난다.
-const DEVICE_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Path=&quot;Microsoft-Windows-Kernel-PnP/Configuration&quot;&gt;&lt;Select Path=&quot;Microsoft-Windows-Kernel-PnP/Configuration&quot;&gt;*[System[Provider[@Name='Microsoft-Windows-Kernel-PnP'] and EventID=400]]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;";
+/// 뒤집혔다). 처음에는 Kernel-PnP 400(장치 구성)을 들었으나, 그 이벤트는 장치를
+/// 처음 구성할 때만 나고 알려진 하드를 다시 꽂을 때는 나지 않았다 (2026-09-05 실측).
+/// 이 이벤트는 디스크가 붙을 때마다 파일 시스템과 무관하게 기록된다. 내장 디스크나
+/// 가상 디스크(부팅·VHD 마운트)에서도 나므로 쿼리에서 `BusType`이 USB(7)인 것만 고른다.
+/// 드라이브 문자 대신 디스크 번호(`DiskNumber`)를 주므로, `sync`가 그 번호로
+/// 방금 꽂힌 디스크의 볼륨만 찾아 훑는다.
+const DISK_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Path=&quot;Microsoft-Windows-Partition/Diagnostic&quot;&gt;&lt;Select Path=&quot;Microsoft-Windows-Partition/Diagnostic&quot;&gt;*[System[Provider[@Name='Microsoft-Windows-Partition'] and EventID=1006]] and *[EventData[Data[@Name='BusType']='7']]&lt;/Select&gt;&lt;/Query&gt;&lt;/QueryList&gt;";
 
 /// 작업 정의 XML을 만든다.
 ///
@@ -40,6 +43,13 @@ const DEVICE_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Pa
 /// 그 값을 꺼내 `sync --drive`에 넘기면 방금 꽂은 하드만 훑는다. 로그온 트리거나
 /// `schtasks /Run`처럼 값이 없는 경로로 실행되면 치환되지 않은 문자열이 그대로 넘어오는데,
 /// `sync` 쪽에서 드라이브 문자로 읽히지 않는 값은 무시하고 연결된 하드를 전부 확인한다.
+/// 디스크 도착 이벤트는 같은 `DriveName` 자리에 디스크 번호를 넣어 넘기며, `sync`는
+/// 숫자를 디스크 번호로 읽어 그 디스크의 볼륨만 본다.
+///
+/// 인스턴스 정책은 `Queue`다. `IgnoreNew`로 두면 하드 하나를 훑는 동안 도착한 다른 하드의
+/// 발화가 버려진다 — 2026-09-05 실측에서 Works A를 훑는 70초 사이에 꽂힌 Works F와 새 SSD가
+/// 인덱싱되지 않았다. 줄을 세우면 차례로 돈다. 같은 하드의 중복 발화(NTFS는 98과 1006이
+/// 둘 다 난다)는 뒤의 인스턴스가 120초 쿨다운에 걸려 건너뛴다.
 fn task_xml(exe: &Path) -> Result<String> {
     let user = std::env::var("USERNAME").context("Could not read the USERNAME environment variable")?;
     let domain = std::env::var("USERDOMAIN").unwrap_or_else(|_| ".".to_string());
@@ -63,10 +73,10 @@ fn task_xml(exe: &Path) -> Result<String> {
     </EventTrigger>
     <EventTrigger>
       <Enabled>true</Enabled>
-      <Subscription>{DEVICE_EVENT_QUERY}</Subscription>
+      <Subscription>{DISK_EVENT_QUERY}</Subscription>
       <Delay>PT15S</Delay>
       <ValueQueries>
-        <Value name="DriveName">Event/EventData/Data[@Name='DeviceInstanceId']</Value>
+        <Value name="DriveName">Event/EventData/Data[@Name='DiskNumber']</Value>
       </ValueQueries>
     </EventTrigger>
     <LogonTrigger>
@@ -82,7 +92,7 @@ fn task_xml(exe: &Path) -> Result<String> {
     </Principal>
   </Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>true</AllowHardTerminate>
@@ -329,14 +339,17 @@ mod tests {
     }
 
     #[test]
-    fn 장치_이벤트_트리거가_함께_들어간다() {
+    fn 디스크_도착_트리거가_함께_들어간다() {
         // exFAT 하드는 Ntfs 이벤트 98을 내지 않아, 파일 시스템을 가리지 않는
-        // 장치 구성 이벤트를 함께 들어야 모든 포맷이 자동으로 인덱싱된다.
+        // 디스크 도착 이벤트를 함께 들어야 모든 포맷이 자동으로 인덱싱된다.
+        // USB 디스크만 고르고, 드라이브 문자 대신 디스크 번호를 넘긴다.
         let xml = task_xml(Path::new(r"C:\bin\drive-archive.exe")).unwrap();
         assert_eq!(xml.matches("<EventTrigger>").count(), 2, "{xml}");
-        assert!(xml.contains("Kernel-PnP"));
-        assert!(xml.contains("EventID=400"));
-        assert!(xml.contains("DeviceInstanceId"));
+        assert!(xml.contains("Microsoft-Windows-Partition/Diagnostic"));
+        assert!(xml.contains("EventID=1006"));
+        assert!(xml.contains("Data[@Name='BusType']='7'"));
+        assert!(xml.contains(r#"<Value name="DriveName">Event/EventData/Data[@Name='DiskNumber']</Value>"#));
+        assert!(!xml.contains("Kernel-PnP"));
     }
 
     #[test]
@@ -348,9 +361,11 @@ mod tests {
     }
 
     #[test]
-    fn 동시_실행을_막도록_설정된다() {
+    fn 동시에_뜨지_않고_늦은_발화는_줄을_선다() {
+        // IgnoreNew면 한 하드를 훑는 동안 꽂은 다른 하드의 발화가 버려진다 (2026-09-05 실측).
         let xml = task_xml(Path::new("x.exe")).unwrap();
-        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+        assert!(xml.contains("<MultipleInstancesPolicy>Queue</MultipleInstancesPolicy>"));
+        assert!(!xml.contains("IgnoreNew"));
     }
 
     #[test]

@@ -23,6 +23,14 @@ use crate::volume::{self, Volume};
 /// 그때마다 전체를 다시 훑는 것은 낭비다.
 const RESCAN_COOLDOWN_SECS: i64 = 120;
 
+/// 디스크 도착 이벤트 뒤 볼륨이 마운트될 때까지 기다리는 한도.
+///
+/// 도착 이벤트는 볼륨이 붙기 전에 난다. 스케줄러의 15초 지연으로도 모자란 경우가
+/// 있었다 — 하드 셋을 한꺼번에 꽂았을 때 도착에서 마운트까지 22초·40초 (2026-09-05 실측).
+/// 5초마다 다시 보며 최대 60초를 기다린다.
+const MOUNT_WAIT_TRIES: u32 = 12;
+const MOUNT_WAIT_STEP: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// 실행 중 다른 인스턴스가 있을 때 잡고 있는 잠금 파일.
 ///
 /// 파일을 공유 없이 열어 두는 방식이라, 프로세스가 어떻게 끝나든
@@ -172,23 +180,53 @@ pub enum SyncOutcome {
     Failed { label: String, letter: char, reason: String },
 }
 
+/// `sync_all`이 볼 하드를 좁히는 조건. 작업 스케줄러가 넘긴 값에서 온다.
+///
+/// NTFS 마운트 이벤트는 드라이브 문자를, 디스크 도착 이벤트(모든 파일 시스템)는
+/// 디스크 번호를 준다. 어느 쪽이든 방금 꽂은 하드만 훑고 나머지는 건드리지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Only {
+    /// 이 드라이브 문자의 볼륨만.
+    Letter(char),
+    /// 이 물리 디스크 위의 볼륨만.
+    Disk(u32),
+}
+
 /// 지금 연결된 외장하드를 확인해 인덱스를 갱신한다.
 ///
 /// 작업 스케줄러가 호출하는 경로이자 `drive-archive sync`가 하는 일이다.
 /// `force`가 참이면 방금 스캔한 하드도 다시 훑는다.
 ///
-/// `only`에 드라이브 문자를 주면 그 하드만 본다. 마운트 이벤트에는 어느 볼륨이 붙었는지가
+/// `only`를 주면 그 하드만 본다. 이벤트에는 어느 볼륨(또는 디스크)이 붙었는지가
 /// 담겨 있으므로, 스케줄러가 그 값을 넘겨 주면 하드 하나를 꽂았을 때 나머지까지 헛되이
 /// 훑지 않는다. 로그온 트리거처럼 볼륨을 알 수 없는 경로로 실행되면 `None`이라 전부 확인한다.
-pub fn sync_all(force: bool, only: Option<char>) -> Result<Vec<SyncOutcome>> {
+pub fn sync_all(force: bool, only: Option<Only>) -> Result<Vec<SyncOutcome>> {
     let mut volumes = volume::list_external_volumes();
 
-    if let Some(letter) = only {
-        volumes.retain(|v| v.letter.eq_ignore_ascii_case(&letter));
+    if let Some(only) = only {
+        match only {
+            Only::Letter(letter) => volumes.retain(|v| v.letter.eq_ignore_ascii_case(&letter)),
+            Only::Disk(n) => {
+                volumes.retain(|v| volume::disk_number(v.letter) == Some(n));
+                let mut tries = 0;
+                while volumes.is_empty() && tries < MOUNT_WAIT_TRIES {
+                    // 아직 마운트 전일 수 있다. 잠금을 쥔 채 기다리므로 줄 선 인스턴스도 같이 기다린다.
+                    tries += 1;
+                    std::thread::sleep(MOUNT_WAIT_STEP);
+                    volumes = volume::list_external_volumes();
+                    volumes.retain(|v| volume::disk_number(v.letter) == Some(n));
+                }
+            }
+        }
         if volumes.is_empty() {
             // 내장 디스크나 카드리더에서도 같은 이벤트가 난다. 전부 훑는 것으로 되돌리면
             // 좁힌 의미가 없으므로, 대상이 아니면 그냥 물러난다.
-            log(&format!("{letter}: 드라이브는 인덱싱 대상이 아니므로 넘어갑니다"));
+            match only {
+                Only::Letter(letter) => {
+                    log(&format!("{letter}: 드라이브는 인덱싱 대상이 아니므로 넘어갑니다"))
+                }
+                Only::Disk(n) => log(&format!("디스크 {n}: 인덱싱 대상 볼륨이 없으므로 넘어갑니다")),
+            }
             return Ok(Vec::new());
         }
     }

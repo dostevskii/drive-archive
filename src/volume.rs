@@ -17,8 +17,9 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{
-    IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery, STORAGE_DEVICE_DESCRIPTOR,
-    STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
+    IOCTL_STORAGE_GET_DEVICE_NUMBER, IOCTL_STORAGE_QUERY_PROPERTY, PropertyStandardQuery,
+    STORAGE_DEVICE_DESCRIPTOR, STORAGE_DEVICE_NUMBER, STORAGE_PROPERTY_QUERY,
+    StorageDeviceProperty,
 };
 use windows::core::PCWSTR;
 
@@ -109,14 +110,12 @@ fn disk_space(letter: char) -> (u64, u64) {
     (total, free)
 }
 
-/// 볼륨이 USB로 연결되어 있는지 확인한다.
+/// 볼륨 장치를 메타데이터 조회용으로 연다.
 ///
-/// `IOCTL_STORAGE_QUERY_PROPERTY`는 접근 권한 0으로 연 핸들에서도 동작하므로
-/// 관리자 권한이 필요 없다.
-fn is_usb(letter: char) -> bool {
+/// 접근 권한 0으로 열어도 `IOCTL_STORAGE_*` 조회는 동작하므로 관리자 권한이 필요 없다.
+fn open_volume(letter: char) -> Option<HANDLE> {
     let path = wide(&format!("\\\\.\\{letter}:"));
-
-    let handle: HANDLE = match unsafe {
+    unsafe {
         CreateFileW(
             PCWSTR(path.as_ptr()),
             0, // 접근 권한 없음 - 메타데이터 조회만 하므로 충분하다
@@ -126,9 +125,44 @@ fn is_usb(letter: char) -> bool {
             FILE_ATTRIBUTE_NORMAL,
             None,
         )
-    } {
-        Ok(h) => h,
-        Err(_) => return false,
+    }
+    .ok()
+}
+
+/// 볼륨이 올라앉은 물리 디스크 번호 (`\\.\PhysicalDriveN`의 N).
+///
+/// 디스크 도착 이벤트(Partition/Diagnostic 1006)는 드라이브 문자 대신 이 번호를
+/// 주므로, 방금 꽂힌 디스크의 볼륨을 찾을 때 쓴다. 읽을 수 없으면 `None`.
+pub fn disk_number(letter: char) -> Option<u32> {
+    let handle = open_volume(letter)?;
+    let mut num = STORAGE_DEVICE_NUMBER::default();
+    let mut returned: u32 = 0;
+
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            None,
+            0,
+            Some(&mut num as *mut _ as *mut _),
+            size_of::<STORAGE_DEVICE_NUMBER>() as u32,
+            Some(&mut returned),
+            None,
+        )
+        .is_ok()
+    };
+
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+
+    ok.then_some(num.DeviceNumber)
+}
+
+/// 볼륨이 USB로 연결되어 있는지 확인한다.
+fn is_usb(letter: char) -> bool {
+    let Some(handle) = open_volume(letter) else {
+        return false;
     };
 
     let query = STORAGE_PROPERTY_QUERY {
