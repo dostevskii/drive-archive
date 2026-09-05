@@ -1,6 +1,6 @@
 [package]
 name = "drive-archive"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 description = "외장하드에 흩어진 자료를 파일 시스템에 상관없이 인덱싱하고, 하드를 연결하지 않아도 검색할 수 있게 해주는 Windows 11 전용 도구"
 license = "GPL-3.0-only"
