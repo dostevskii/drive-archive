@@ -152,7 +152,7 @@ Plug in an external drive and indexing starts on its own. Check progress with:
 .\drive-archive.exe drives
 ```
 
-> Indexing speed depends on the number of files. A 1.8 TB NTFS drive with 22,661 entries took about 5 seconds; a 3.6 TB exFAT drive with 171,139 entries took about 10 minutes. It runs at low priority so it stays out of your way, and every run after the first only reconciles what changed — much faster.
+> Indexing speed depends on the number of files. A 1.8 TB NTFS drive with 22,661 entries took about 5 seconds; a 3.6 TB exFAT drive with 171,139 entries took about 10 minutes. It runs at low priority so it stays out of your way. Each reconnect re-reads the whole drive, and only what changed is written to the index.
 
 ### Uninstall
 

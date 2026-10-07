@@ -54,7 +54,7 @@ drive-archive status --json                                    # 인덱스 통�
 | 파일 | 역할 |
 |---|---|
 | `main.rs` | CLI 진입점 (clap) |
-| `volume.rs` | USB NTFS 볼륨 식별 (Win32) |
+| `volume.rs` | USB 볼륨 식별 — 파일 시스템 무관 (Win32) |
 | `db.rs` | SQLite 스키마, 스캔 diff 반영, 검색 |
 | `scan.rs` | 병렬 디렉토리 순회 (jwalk) |
 | `sync.rs` | 연결 시 동기화, 단일 인스턴스 잠금, 로그 |
@@ -62,5 +62,9 @@ drive-archive status --json                                    # 인덱스 통�
 | `mcp.rs` | MCP stdio 서버 (JSON-RPC 2.0 직접 구현) |
 | `install.rs` | 원커맨드 설치 (스케줄러 + Claude 설정) |
 | `elevation.rs` | 관리자 권한 확인, UAC 상승 |
+| `serve.rs` | 웹 화면 HTTP 서버 (`std::net` 직접 구현, 127.0.0.1 전용) |
+| `auth.rs` | 웹 비밀번호(argon2id), 세션, 로그인 잠금 |
+| `envpath.rs` | 사용자 PATH 등록·제거 (레지스트리 값 타입 보존) |
+| `web/index.html` | 웹 화면 (HTML·CSS·JS 한 파일, 실행 파일에 포함) |
 
 인덱스는 `%LOCALAPPDATA%\drive-archive\index.db`, 로그는 같은 폴더의 `sync.log`에 있습니다.
