@@ -196,7 +196,8 @@ fn is_usb(letter: char) -> bool {
         return false;
     }
 
-    let desc = unsafe { &*(buf.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR) };
+    // 바이트 버퍼는 구조체의 정렬을 보장하지 않으므로 참조로 바꾸지 않고 복사해 읽는다.
+    let desc = unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const STORAGE_DEVICE_DESCRIPTOR) };
     desc.BusType == BusTypeUsb
 }
 

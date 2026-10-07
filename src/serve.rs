@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use anyhow::Result;
@@ -90,6 +91,7 @@ fn internal_error(e: &anyhow::Error) -> (u16, String, Option<String>) {
 /// 로그인을 처리한다. (상태 코드, 본문, Set-Cookie 한 줄)
 fn api_login(req: &Request, st: &ServeState) -> (u16, String, Option<String>) {
     let ip = req.client_ip();
+    let _turn = st.gate.one_at_a_time();
     let now = SystemTime::now();
 
     if let Some(left) = st.gate.locked_for(&ip, now) {
@@ -158,16 +160,43 @@ pub fn serve(port: u16, open_browser: bool) -> Result<()> {
             .spawn();
     }
 
+    accept_loop(listener, state);
+    Ok(())
+}
+
+/// 동시에 처리하는 연결의 상한.
+///
+/// 연결마다 스레드를 띄우므로 상한이 없으면 연결을 쌓아 스레드를 바닥내고 서버를
+/// 죽일 수 있다. 브라우저 하나는 많아야 예닐곱 개를 연다.
+const MAX_CONNECTIONS: usize = 64;
+
+/// 처리 중인 연결 하나. 스레드가 어떻게 끝나든(패닉 포함) 자리를 돌려준다.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 연결을 받아 하나마다 스레드로 처리한다. 상한을 넘은 연결은 받자마자 닫는다.
+fn accept_loop(listener: TcpListener, state: Arc<ServeState>) {
+    let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
+        if active.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+            active.fetch_sub(1, Ordering::SeqCst);
+            continue;
+        }
+        let slot = Slot(Arc::clone(&active));
         let st = Arc::clone(&state);
         std::thread::spawn(move || {
+            let _slot = slot;
             if let Err(e) = handle(stream, &st) {
                 eprintln!("Request handling failed: {e:#}");
             }
         });
     }
-    Ok(())
 }
 
 /// 연결 하나를 처리한다.
@@ -753,6 +782,52 @@ mod tests {
         let (status, body, _) = api_login(&로그인_요청("열려라참깨입니다"), &st);
         assert_eq!(status, 429);
         assert!(body.contains("locked"), "{body}");
+    }
+
+    /// 잠금 확인과 실패 기록 사이에 argon2 검증이 끼어 있어, 동시에 몰려든 요청이
+    /// 잠금 확인을 한꺼번에 통과하면 "다섯 번" 한도가 무의미해진다.
+    #[test]
+    fn 동시에_몰아쳐도_다섯_번까지만_검사한다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let st = Arc::new(st);
+        let n = 20;
+        let barrier = Arc::new(std::sync::Barrier::new(n));
+        let workers: Vec<_> = (0..n)
+            .map(|_| {
+                let r = 로그인_요청("틀린비밀번호입니다");
+                let (st, barrier) = (Arc::clone(&st), Arc::clone(&barrier));
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    api_login(&r, &st).0
+                })
+            })
+            .collect();
+        let statuses: Vec<u16> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+
+        let checked = statuses.iter().filter(|&&s| s == 401).count();
+        assert_eq!(checked, 5, "{statuses:?}");
+    }
+
+    /// 연결마다 스레드를 띄우므로 상한이 없으면 연결을 쌓아 서버를 죽일 수 있다.
+    #[test]
+    fn 연결이_상한을_넘으면_새_연결은_바로_닫는다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || accept_loop(listener, Arc::new(st)));
+
+        // 아무것도 보내지 않는 연결로 자리를 채운다. 서버는 읽기 타임아웃까지 기다린다.
+        let idle: Vec<_> = (0..MAX_CONNECTIONS)
+            .map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap())
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let mut extra = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        extra.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        let mut buf = [0u8; 1];
+        let n = extra.read(&mut buf).expect("상한을 넘은 연결은 기다리지 않고 닫혀야 한다");
+        assert_eq!(n, 0);
+        drop(idle);
     }
 
     #[test]

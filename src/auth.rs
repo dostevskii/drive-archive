@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
@@ -165,6 +165,8 @@ pub struct Gate {
     /// 주소를 가리지 않은 (실패 횟수, 마지막 실패 시각).
     /// `X-Forwarded-For`를 지어내 주소별 카운터를 피해 가는 경우를 막는다.
     global: Mutex<Option<(u32, SystemTime)>>,
+    /// 로그인 시도를 하나씩 처리하기 위한 차례.
+    turn: Mutex<()>,
 }
 
 /// 마지막 실패로부터 얼마 지났는지 보고, 잠금 시간이 남았으면 그 초를 준다.
@@ -174,6 +176,15 @@ fn lock_remaining(at: SystemTime, now: SystemTime) -> Option<u64> {
 }
 
 impl Gate {
+    /// 로그인 시도 하나가 끝날 때까지 다음 시도를 세운다.
+    ///
+    /// 잠금 확인과 실패 기록 사이에 argon2 검증이 끼어 있어, 동시에 온 요청이 확인을
+    /// 한꺼번에 통과하면 한도가 무의미해진다(2026-10-07, 20개 동시 요청이 전부 검사됨).
+    /// 검증 하나가 약 19MiB를 쓰므로 한 번에 하나만 돌리는 것이 메모리에도 맞다.
+    pub fn one_at_a_time(&self) -> MutexGuard<'_, ()> {
+        self.turn.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     pub fn note_failure(&self, ip: &str, now: SystemTime) {
         {
             let mut per_ip = self.per_ip.lock().unwrap();

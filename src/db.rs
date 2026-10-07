@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::volume::Volume;
@@ -236,7 +236,13 @@ pub fn apply_scan(conn: &mut Connection, drive_id: i64, scanned: &[Entry]) -> Re
         let mut update =
             tx.prepare("UPDATE entries SET name = ?1, is_dir = ?2, size = ?3, mtime = ?4 WHERE id = ?5")?;
 
+        let mut seen = HashSet::new();
         for e in scanned {
+            // 이름을 문자열로 바꾸면서 서로 다른 이름이 같아질 수 있다(짝 없는 서로게이트).
+            // 같은 경로를 두 번 넣으면 UNIQUE에 걸려 반영 전체가 실패하므로 처음 것만 쓴다.
+            if !seen.insert(e.path.as_str()) {
+                continue;
+            }
             match existing.remove(&e.path) {
                 None => {
                     insert.execute(params![
@@ -336,7 +342,7 @@ pub fn search(
         sql.push_str(" AND e.is_dir = 1");
     }
     if drive.is_some() {
-        sql.push_str(r#" AND (d.label LIKE ?3 ESCAPE '\' OR d.volume_serial = ?3)"#);
+        sql.push_str(r#" AND (d.label LIKE ?3 ESCAPE '\' OR d.volume_serial = ?4)"#);
     }
     sql.push_str(" ORDER BY name_hit DESC, e.is_dir DESC, d.label, e.path LIMIT ?2");
 
@@ -357,7 +363,7 @@ pub fn search(
     let hits: Vec<SearchHit> = match drive {
         Some(d) => {
             let dp = format!("%{}%", escape_like(d));
-            stmt.query_map(params![pattern, limit as i64, dp], map_row)?
+            stmt.query_map(params![pattern, limit as i64, dp, d], map_row)?
                 .collect::<rusqlite::Result<_>>()?
         }
         None => stmt
@@ -813,6 +819,34 @@ mod tests {
         let hits = search(&conn, "공통", Some("BACKUP"), false, 50).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].drive_label, "BACKUP-02");
+    }
+
+    /// 같은 라벨의 하드가 둘일 때(다시 포맷한 하드 등) 시리얼로 구분해야 한다.
+    #[test]
+    fn 시리얼로_하드를_한정할_수_있다() {
+        let mut conn = test_db();
+        let a = test_drive(&conn, "AAAA0001", "Works A");
+        let b = test_drive(&conn, "BBBB0002", "Works A");
+        apply_scan(&mut conn, a, &[file("공통.txt", 10, 100)]).unwrap();
+        apply_scan(&mut conn, b, &[file("공통.txt", 10, 100)]).unwrap();
+
+        let hits = search(&conn, "공통", Some("BBBB0002"), false, 50).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].drive_serial, "BBBB0002");
+    }
+
+    /// 짝 없는 서로게이트가 든 이름은 문자열로 바꾸면 서로 같아질 수 있다.
+    /// 같은 경로가 두 번 와도 반영 전체가 실패하면 그 하드는 영영 갱신되지 않는다.
+    #[test]
+    fn 같은_경로가_두_번_와도_반영은_성공한다() {
+        let mut conn = test_db();
+        let id = test_drive(&conn, "AAAA0001", "PROJECT-A");
+
+        let stats = apply_scan(&mut conn, id, &[file("�.txt", 10, 100), file("�.txt", 20, 200)])
+            .unwrap();
+
+        assert_eq!(stats.added, 1);
+        assert_eq!(entry_count(&conn, id).unwrap(), 1);
     }
 
     #[test]

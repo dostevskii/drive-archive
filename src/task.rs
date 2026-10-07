@@ -53,7 +53,8 @@ const DISK_EVENT_QUERY: &str = "&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; Path
 fn task_xml(exe: &Path) -> Result<String> {
     let user = std::env::var("USERNAME").context("Could not read the USERNAME environment variable")?;
     let domain = std::env::var("USERDOMAIN").unwrap_or_else(|_| ".".to_string());
-    let exe = exe.display().to_string();
+    let (user, domain) = (xml_escape(&user), xml_escape(&domain));
+    let exe = xml_escape(&exe.display().to_string());
 
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
@@ -121,6 +122,14 @@ fn task_xml(exe: &Path) -> Result<String> {
     ))
 }
 
+/// 작업 XML에 끼워 넣는 값의 특수문자를 바꾼다. 경로에 `&`가 있으면 XML이 깨져 등록이 거부된다.
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// 웹 화면을 로그온할 때 띄우는 작업.
 ///
 /// sync 작업과 세 곳이 다르다. 트리거는 로그온뿐이고(하드를 꽂았다고 서버를 다시
@@ -130,7 +139,8 @@ fn task_xml(exe: &Path) -> Result<String> {
 fn serve_task_xml(exe: &Path) -> Result<String> {
     let user = std::env::var("USERNAME").context("Could not read the USERNAME environment variable")?;
     let domain = std::env::var("USERDOMAIN").unwrap_or_else(|_| ".".to_string());
-    let exe = exe.display().to_string();
+    let (user, domain) = (xml_escape(&user), xml_escape(&domain));
+    let exe = xml_escape(&exe.display().to_string());
 
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
@@ -322,6 +332,14 @@ mod tests {
         let xml = task_xml(Path::new("C:\\Tools\\drive-archive.exe")).unwrap();
         assert!(xml.contains("<Command>C:\\Tools\\drive-archive.exe</Command>"));
         assert!(xml.contains("<Arguments>sync --drive $(DriveName)</Arguments>"));
+    }
+
+    #[test]
+    fn 경로의_특수문자는_xml로_이스케이프한다() {
+        let exe = Path::new(r"C:\Tools & <Co>\drive-archive.exe");
+        for xml in [task_xml(exe).unwrap(), serve_task_xml(exe).unwrap()] {
+            assert!(xml.contains(r"C:\Tools &amp; &lt;Co&gt;\drive-archive.exe"), "{xml}");
+        }
     }
 
     #[test]

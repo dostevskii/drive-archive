@@ -85,6 +85,12 @@ pub fn scan_root(root: &str) -> Result<ScanResult> {
             }
         };
 
+        // 폴더 목록을 읽지 못해도 jwalk는 그 폴더를 정상 항목으로 내보내고 오류는
+        // 여기에만 남긴다. 세지 않으면 하위 트리가 빠진 결과가 "오류 없음"으로 통과한다.
+        if entry.read_children.as_ref().is_some_and(|c| c.error().is_some()) {
+            errors += 1;
+        }
+
         // 첫 항목은 루트 자기 자신이므로 인덱스에 넣지 않는다.
         if entry.depth() == 0 {
             continue;
@@ -244,6 +250,50 @@ mod tests {
         drop(tmp);
 
         assert!(scan_root(&path).is_err());
+    }
+
+    /// 폴더 목록을 읽지 못하면 jwalk는 그 폴더를 오류가 아닌 정상 항목으로 내보내고
+    /// 오류는 `read_children`에만 남긴다. 그것을 세지 않으면 하위 항목이 통째로 빠진
+    /// 결과가 "오류 없음"으로 통과해, 인덱스에서 그 하위 트리가 지워진다.
+    #[test]
+    fn 목록을_읽지_못한_폴더는_오류로_센다() {
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("잠김");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("안.txt"), b"x").unwrap();
+        let _guard = DenyList::new(&locked);
+
+        let r = scan_root(&tmp.path().to_string_lossy()).unwrap();
+
+        assert_eq!(r.errors, 1);
+    }
+
+    /// 폴더의 목록 읽기를 막고, 테스트가 실패해도 끝날 때 되돌린다.
+    struct DenyList(std::path::PathBuf);
+
+    impl DenyList {
+        fn new(dir: &std::path::Path) -> Self {
+            let user = std::env::var("USERNAME").unwrap();
+            let ok = std::process::Command::new("icacls")
+                .arg(dir)
+                .args(["/deny", &format!("{user}:(RD)")])
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "icacls로 권한을 막지 못했다");
+            DenyList(dir.to_path_buf())
+        }
+    }
+
+    impl Drop for DenyList {
+        fn drop(&mut self) {
+            let user = std::env::var("USERNAME").unwrap();
+            let _ = std::process::Command::new("icacls")
+                .arg(&self.0)
+                .args(["/remove:d", &user])
+                .output();
+        }
     }
 
     /// 사용자는 스캔이 도는 줄 모르고 탐색기에서 파일을 옮기거나 지운다.
