@@ -442,8 +442,8 @@ fn check_new_password(first: &str, second: &str) -> Result<String> {
     if first.trim().is_empty() {
         anyhow::bail!("Password is empty.");
     }
-    if first.chars().count() < 8 {
-        anyhow::bail!("Password must be at least 8 characters. This screen is reachable from outside.");
+    if first.chars().count() < 12 {
+        anyhow::bail!("Password must be at least 12 characters. This screen is reachable from outside.");
     }
     Ok(first.to_string())
 }
@@ -488,7 +488,7 @@ fn read_hidden(prompt: &str) -> Result<String> {
 
 /// 새 비밀번호를 두 번 받아 저장한다. `install`도 이 함수를 쓴다.
 fn prompt_and_set_password() -> Result<()> {
-    let first = read_hidden("New password (8+ characters): ")?;
+    let first = read_hidden("New password (12+ characters): ")?;
     let second = read_hidden("Retype password: ")?;
     let password = check_new_password(&first, &second)?;
     auth::set_password(&password)?;
@@ -503,7 +503,7 @@ fn cmd_passwd() -> Result<()> {
     }
     prompt_and_set_password()?;
     println!("Password saved.");
-    println!("Existing web sessions remain active. Restart the server to end them all.");
+    println!("Existing web sessions have ended. Sign in again with the new password.");
     Ok(())
 }
 
@@ -681,13 +681,13 @@ mod tests {
     fn 너무_짧으면_거부한다() {
         // 밖에 열리는 화면이다. 네 글자짜리는 찍어서 뚫린다.
         assert!(check_new_password("1234", "1234").is_err());
-        assert!(check_new_password("일곱글자짜리요", "일곱글자짜리요").is_err());
+        assert!(check_new_password("abcdefghijk", "abcdefghijk").is_err(), "11자");
     }
 
     #[test]
     fn 쓸_만한_비밀번호는_통과한다() {
-        assert!(check_new_password("충분히긴비밀번호", "충분히긴비밀번호").is_ok());
+        assert!(check_new_password("충분히긴비밀번호입니다아", "충분히긴비밀번호입니다아").is_ok());
         // 앞뒤 공백은 사용자가 의도한 것일 수 있으므로 지우지 않는다.
-        assert_eq!(check_new_password(" abcdefgh", " abcdefgh").unwrap(), " abcdefgh");
+        assert_eq!(check_new_password(" abcdefghijk", " abcdefghijk").unwrap(), " abcdefghijk");
     }
 }

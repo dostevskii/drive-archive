@@ -173,6 +173,8 @@
   /* 경로는 41칸을 넘겨도 좋다. 이 줄이 화면의 결론이라 잘리면 쓸모가 없다. */
   #where  { white-space: pre; overflow: hidden; text-overflow: ellipsis; height: var(--line); }
   #vim    { white-space: pre; cursor: pointer; display: inline-block; }
+  /* 남의 기기에서 쓴 뒤 세션을 끊는 자리. VIM MODE와 같은 줄에 같은 모양으로 둔다. */
+  #logout { white-space: pre; cursor: pointer; display: inline-block; }
   #mode   { white-space: pre; }
 
   /* ── 비밀번호 게이트 ───────────────────────────────── */
@@ -183,6 +185,7 @@
   body.gate #list,
   body.gate #more,
   body.gate #vim,
+  body.gate #logout,
   body.gate #mode { display: none; }
 
   /* `#where`는 남긴다. 틀렸다는 것과 잠금이 얼마나 남았는지 적을 자리가 필요하고,
@@ -223,7 +226,7 @@ VWXYZ0123456789&amp;-:.+=
 
   <div id="status">
     <div id="where"></div>
-    <div id="vim">VIM MODE  [OFF]</div>
+    <div id="vim">VIM MODE  [OFF]</div><span id="logout">   LOGOUT</span>
     <div id="mode">--INSERT--</div>
   </div>
 
@@ -254,6 +257,7 @@ const el = {
   where:  document.getElementById('where'),
   more:   document.getElementById('more'),
   vim:    document.getElementById('vim'),
+  logout: document.getElementById('logout'),
   mode:   document.getElementById('mode'),
 };
 
@@ -786,6 +790,11 @@ function toggleVim() {
 
 el.list.addEventListener('scroll', paintMore);
 el.vim.addEventListener('mousedown', e => { e.preventDefault(); toggleVim(); });
+el.logout.addEventListener('mousedown', async e => {
+  e.preventDefault();
+  try { await fetch('/api/logout', { method: 'POST' }); } catch (_) { /* 서버가 없어도 화면은 게이트로 */ }
+  showGate('로그아웃했습니다.');
+});
 el.bar.addEventListener('mousedown', () => setInsert(true));
 
 /* ── 키 ────────────────────────────────────────────── */

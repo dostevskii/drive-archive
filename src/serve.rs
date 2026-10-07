@@ -64,7 +64,8 @@ fn needs_auth(path: &str) -> bool {
 /// 쿠키의 세션이 살아 있는가. 살아 있으면 만료가 24시간 뒤로 밀린다.
 fn authed(req: &Request, st: &ServeState) -> bool {
     let token = req.cookie(COOKIE_NAME).unwrap_or("");
-    st.sessions.check(token, SystemTime::now())
+    let now = SystemTime::now();
+    st.sessions.check(token, now, crate::auth::sessions_valid_since(&st.dir, now))
 }
 
 /// 세션 쿠키 한 줄을 만든다.
@@ -121,6 +122,45 @@ fn api_login(req: &Request, st: &ServeState) -> (u16, String, Option<String>) {
             (401, serde_json::json!({ "error": "wrong" }).to_string(), None)
         }
         Err(e) => internal_error(&e),
+    }
+}
+
+/// 로그아웃한다. 세션을 지우고 브라우저의 쿠키를 비우는 Set-Cookie 한 줄을 준다.
+///
+/// 세션이 없어도 쿠키는 비운다. 남의 기기에서 쓴 뒤 끊으려는 것이니 조용히 끝내면 된다.
+fn api_logout(req: &Request, st: &ServeState) -> String {
+    if let Some(token) = req.cookie(COOKIE_NAME) {
+        st.sessions.revoke(token);
+    }
+    let secure = if req.is_https() { "; Secure" } else { "" };
+    format!("Set-Cookie: {COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}")
+}
+
+/// 요청 하나를 다 읽는 데 주는 시간.
+const REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 마감 시각이 있는 읽기. 소켓의 읽기 제한은 read 한 번마다 걸려, 조금씩 흘려 보내는
+/// 연결은 끊지 못한다 — 6초 간격 6조각으로 보낸 요청이 30초 만에 받아들여졌다(2026-10-07).
+/// 읽을 때마다 남은 시간만큼만 기다린다.
+struct Deadline {
+    stream: TcpStream,
+    end: std::time::Instant,
+}
+
+impl Deadline {
+    fn new(stream: TcpStream, limit: std::time::Duration) -> Self {
+        Deadline { stream, end: std::time::Instant::now() + limit }
+    }
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.end.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
     }
 }
 
@@ -208,6 +248,11 @@ fn handle(mut stream: TcpStream, st: &ServeState) -> Result<()> {
     let Some(req) = read_request(&mut stream, peer)? else {
         return Ok(());
     };
+
+    if req.path == "/api/logout" && req.method == "POST" {
+        let cookie = api_logout(&req, st);
+        return respond_with(&mut stream, 200, "application/json; charset=utf-8", br#"{"ok":true}"#, &[cookie]);
+    }
 
     if req.path == "/api/login" && req.method == "POST" {
         let (status, body, cookie) = api_login(&req, st);
@@ -306,13 +351,18 @@ impl Request {
     /// 로그인 실패를 셀 때 쓸 주소.
     ///
     /// 터널을 거치면 소켓 주소가 전부 127.0.0.1이 되어, 그것만 쓰면 한 사람의 오타가
-    /// 전체를 잠근다. 다만 이 헤더는 보내는 쪽이 지어낼 수 있으므로 이것만 믿지
-    /// 않는다 — `auth::Gate`가 전역 카운터를 함께 센다.
+    /// 전체를 잠근다. 외부 입구는 Cloudflare Tunnel 하나이고, 엣지는 접속자가 보낸
+    /// `CF-Connecting-IP`를 403으로 거부하므로 이 헤더는 엣지가 채운 값이다(2026-10-07 실측).
+    /// `X-Forwarded-For` 맨 앞은 접속자가 지어낼 수 있어 쓰지 않는다. 주소 꼴이 아니면
+    /// 버린다 — 긴 문자열이 잠금 기록의 키로 쌓이면 안 된다.
+    ///
+    /// 로컬 프로세스는 127.0.0.1에 직접 붙어 이 헤더를 지어낼 수 있다. 그래서 이것만
+    /// 믿지 않고 `auth::Gate`가 전역 카운터를 함께 센다. 다른 입구(Funnel 등)를 다시
+    /// 붙이면 그 경로에서는 위조가 되므로 이 판단을 다시 해야 한다.
     pub fn client_ip(&self) -> String {
-        self.header("x-forwarded-for")
-            .and_then(|v| v.split(',').next())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
+        self.header("cf-connecting-ip")
+            .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok())
+            .map(|ip| ip.to_string())
             .unwrap_or_else(|| self.peer.clone())
     }
 
@@ -327,8 +377,7 @@ fn read_request(stream: &mut TcpStream, peer: String) -> Result<Option<Request>>
     // 터널을 거쳐 아무나 닿는 자리다. 한 글자씩 흘리며 스레드를 영영 붙드는
     // 연결은 시간으로 끊고, 전체 요청은 크기로 자른다. `take`가 헤더 한 줄이
     // 한없이 자라는 것까지 막는다.
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
-    let mut reader = BufReader::new(stream.try_clone()?.take(64 * 1024));
+    let mut reader = BufReader::new(Deadline::new(stream.try_clone()?, REQUEST_DEADLINE).take(64 * 1024));
 
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
@@ -508,6 +557,16 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
     respond_with(stream, status, content_type, body, &[])
 }
 
+/// 모든 응답에 붙이는 보안 헤더.
+///
+/// HSTS는 HTTPS로 받은 응답에서만 브라우저가 따르므로, 로컬 http://127.0.0.1에는
+/// 영향이 없다. includeSubDomains는 붙이지 않는다 — 같은 도메인의 다른 이름까지 묶지 않는다.
+const SECURITY_HEADERS: &str = "X-Content-Type-Options: nosniff\r\n\
+     X-Frame-Options: DENY\r\n\
+     Content-Security-Policy: frame-ancestors 'none'; base-uri 'none'; object-src 'none'\r\n\
+     Referrer-Policy: no-referrer\r\n\
+     Strict-Transport-Security: max-age=31536000\r\n";
+
 fn respond_with(
     stream: &mut TcpStream,
     status: u16,
@@ -527,6 +586,7 @@ fn respond_with(
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          Cache-Control: no-store\r\n\
+         {SECURITY_HEADERS}\
          Connection: close\r\n",
         body.len()
     );
@@ -724,11 +784,76 @@ mod tests {
     }
 
     #[test]
-    fn 전달받은_주소를_쓰고_없으면_소켓_주소를_쓴다() {
-        let r = req("GET / HTTP/1.1\r\nX-Forwarded-For: 9.9.9.9, 8.8.8.8\r\n\r\n").unwrap();
-        assert_eq!(r.client_ip(), "9.9.9.9", "맨 앞이 원래 보낸 쪽이다");
-        let r = req("GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+    fn 클라우드플레어가_채운_주소를_쓰고_없으면_소켓_주소를_쓴다() {
+        // X-Forwarded-For 맨 앞은 접속자가 지어낼 수 있다(2026-10-07 실측). 쓰지 않는다.
+        let r = req("GET / HTTP/1.1\r\nCF-Connecting-IP: 8.8.8.8\r\nX-Forwarded-For: 9.9.9.9, 8.8.8.8\r\n\r\n").unwrap();
+        assert_eq!(r.client_ip(), "8.8.8.8");
+        let r = req("GET / HTTP/1.1\r\nX-Forwarded-For: 9.9.9.9\r\n\r\n").unwrap();
         assert_eq!(r.client_ip(), "1.2.3.4");
+        // 주소 꼴이 아니면 버린다. 긴 문자열이 잠금 기록의 키로 쌓이면 안 된다.
+        let raw = format!("GET / HTTP/1.1\r\nCF-Connecting-IP: {}\r\n\r\n", "x".repeat(1000));
+        assert_eq!(req(&raw).unwrap().client_ip(), "1.2.3.4");
+    }
+
+    /// 읽기 제한이 read 한 번마다 걸리면, 조금씩 흘려 보내는 연결이 자리를 오래 붙든다.
+    #[test]
+    fn 요청_전체에_마감_시각이_있다() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+            for _ in 0..20 {
+                if s.write_all(b"G").is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        });
+        let (stream, _) = listener.accept().unwrap();
+        let started = std::time::Instant::now();
+
+        let mut r = Deadline::new(stream, std::time::Duration::from_secs(1));
+        let err = r.read_to_end(&mut Vec::new()).unwrap_err();
+
+        assert!(matches!(err.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn 모든_응답에_보안_헤더를_붙인다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let s = listener.incoming().next().unwrap().unwrap();
+            let _ = handle(s, &st);
+        });
+        let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        s.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let res = read_all(s);
+
+        for h in [
+            "X-Content-Type-Options: nosniff",
+            "X-Frame-Options: DENY",
+            "Content-Security-Policy: frame-ancestors 'none'; base-uri 'none'; object-src 'none'",
+            "Referrer-Policy: no-referrer",
+            "Strict-Transport-Security: max-age=31536000",
+        ] {
+            assert!(res.contains(h), "{h} 없음:\n{}", &res[..res.find("\r\n\r\n").unwrap_or(0)]);
+        }
+    }
+
+    #[test]
+    fn 로그아웃하면_그_쿠키로는_더_볼_수_없다() {
+        let (_d, st) = 준비된_상태("열려라참깨입니다");
+        let (_, _, cookie) = api_login(&로그인_요청("열려라참깨입니다"), &st);
+        let token = cookie.unwrap().trim_start_matches("Set-Cookie: da=").split(';').next().unwrap().to_string();
+        let with_cookie = |line: &str| req(&format!("{line} HTTP/1.1\r\nCookie: da={token}\r\n\r\n")).unwrap();
+
+        let cleared = api_logout(&with_cookie("POST /api/logout"), &st);
+
+        assert!(cleared.contains("da=;") && cleared.contains("Max-Age=0"), "{cleared}");
+        assert!(!authed(&with_cookie("GET /api/drives"), &st));
     }
 
     /// 비밀번호가 설정된 임시 상태를 만든다.

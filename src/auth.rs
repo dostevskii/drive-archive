@@ -94,12 +94,15 @@ pub fn is_configured() -> bool {
 /// 세션이 살아 있는 시간. 쓰는 동안에는 계속 이만큼씩 밀린다.
 pub const SESSION_SECS: u64 = 86_400;
 
-/// 발급한 세션과 각각의 만료 시각.
+/// 세션의 절대 수명. 매일 쓰면 만료가 계속 밀리므로 발급 시각부터 따로 끊는다.
+const SESSION_MAX_SECS: u64 = 7 * 86_400;
+
+/// 발급한 세션과 각각의 (발급 시각, 만료 시각).
 ///
 /// 메모리에만 둔다. 서버를 다시 띄우면 전부 무효가 되는데, 단순하고 오히려 안전하다.
 #[derive(Default)]
 pub struct Sessions {
-    live: Mutex<HashMap<String, SystemTime>>,
+    live: Mutex<HashMap<String, (SystemTime, SystemTime)>>,
 }
 
 impl Sessions {
@@ -110,22 +113,23 @@ impl Sessions {
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
         let mut live = self.live.lock().unwrap();
-        live.insert(token.clone(), now + Duration::from_secs(SESSION_SECS));
+        live.insert(token.clone(), (now, now + Duration::from_secs(SESSION_SECS)));
         Ok(token)
     }
 
     /// 유효한 토큰인가. 유효하면 만료를 24시간 뒤로 다시 잡는다.
     ///
+    /// `valid_since`보다 먼저 발급된 세션은 받지 않는다([`sessions_valid_since`]).
     /// 만료된 것은 이 자리에서 지운다. 따로 청소하는 사람이 없으면 오래 켜 둔
     /// 컴퓨터에서 죽은 세션이 쌓이기만 한다.
-    pub fn check(&self, token: &str, now: SystemTime) -> bool {
+    pub fn check(&self, token: &str, now: SystemTime, valid_since: SystemTime) -> bool {
         if token.is_empty() {
             return false;
         }
         let mut live = self.live.lock().unwrap();
-        live.retain(|_, expires| *expires > now);
+        live.retain(|_, (issued, expires)| *expires > now && *issued >= valid_since);
         match live.get_mut(token) {
-            Some(expires) => {
+            Some((_, expires)) => {
                 *expires = now + Duration::from_secs(SESSION_SECS);
                 true
             }
@@ -133,10 +137,30 @@ impl Sessions {
         }
     }
 
+    /// 로그아웃. 그 토큰을 지운다.
+    pub fn revoke(&self, token: &str) {
+        self.live.lock().unwrap().remove(token);
+    }
+
     /// 살아 있는 세션 수. 테스트에서 쓴다.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.live.lock().unwrap().len()
+    }
+}
+
+/// 이 시각보다 먼저 발급된 세션은 받지 않는다.
+///
+/// 비밀번호를 바꾼 시각(auth.json 수정 시각)과 절대 수명의 시작 중 늦은 쪽이다. 세션은
+/// serve 프로세스 메모리에 있어 passwd가 직접 지울 수 없으므로, 파일 시각으로 가른다.
+/// auth.json을 읽을 수 없으면 지금 시각을 돌려 모든 세션을 막는다.
+pub fn sessions_valid_since(dir: &Path, now: SystemTime) -> SystemTime {
+    let max_age = now
+        .checked_sub(Duration::from_secs(SESSION_MAX_SECS))
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+    match std::fs::metadata(auth_path(dir)).and_then(|m| m.modified()) {
+        Ok(changed) => changed.max(max_age),
+        Err(_) => now,
     }
 }
 
@@ -188,11 +212,10 @@ impl Gate {
     pub fn note_failure(&self, ip: &str, now: SystemTime) {
         {
             let mut per_ip = self.per_ip.lock().unwrap();
+            // 잠금 시간이 지난 주소는 지운다. 다음 실패 때 처음부터 다시 세는 것과 같고,
+            // 주소를 바꿔 가며 틀리는 쪽에 맞춰 기록이 쌓이지 않는다.
+            per_ip.retain(|_, (_, at)| lock_remaining(*at, now).is_some());
             let e = per_ip.entry(ip.to_string()).or_insert((0, now));
-            // 잠금 시간이 지났으면 처음부터 다시 센다.
-            if lock_remaining(e.1, now).is_none() {
-                *e = (0, now);
-            }
             e.0 += 1;
             e.1 = now;
         }
@@ -207,6 +230,11 @@ impl Gate {
             _ => 0,
         };
         *g = Some((cur + 1, now));
+    }
+
+    #[cfg(test)]
+    pub fn tracked(&self) -> usize {
+        self.per_ip.lock().unwrap().len()
     }
 
     pub fn note_success(&self, ip: &str) {
@@ -294,7 +322,7 @@ mod tests {
         let s = Sessions::default();
         let now = SystemTime::UNIX_EPOCH;
         let t = s.issue(now).unwrap();
-        assert!(s.check(&t, now));
+        assert!(s.check(&t, now, SystemTime::UNIX_EPOCH));
     }
 
     #[test]
@@ -302,8 +330,8 @@ mod tests {
         let s = Sessions::default();
         let now = SystemTime::UNIX_EPOCH;
         s.issue(now).unwrap();
-        assert!(!s.check("아무거나", now));
-        assert!(!s.check("", now));
+        assert!(!s.check("아무거나", now, SystemTime::UNIX_EPOCH));
+        assert!(!s.check("", now, SystemTime::UNIX_EPOCH));
     }
 
     #[test]
@@ -312,7 +340,7 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         let t = s.issue(now).unwrap();
         let 하루뒤 = now + Duration::from_secs(SESSION_SECS + 1);
-        assert!(!s.check(&t, 하루뒤));
+        assert!(!s.check(&t, 하루뒤, SystemTime::UNIX_EPOCH));
     }
 
     #[test]
@@ -323,11 +351,11 @@ mod tests {
         let t = s.issue(now).unwrap();
         for _ in 0..3 {
             now += Duration::from_secs(23 * 3600);
-            assert!(s.check(&t, now), "23시간 간격이면 연장되어야 한다");
+            assert!(s.check(&t, now, SystemTime::UNIX_EPOCH), "23시간 간격이면 연장되어야 한다");
         }
         // 그러다 하루를 통째로 쉬면 끊긴다.
         now += Duration::from_secs(SESSION_SECS + 1);
-        assert!(!s.check(&t, now));
+        assert!(!s.check(&t, now, SystemTime::UNIX_EPOCH));
     }
 
     #[test]
@@ -347,8 +375,70 @@ mod tests {
         let now = SystemTime::UNIX_EPOCH;
         let t = s.issue(now).unwrap();
         let 하루뒤 = now + Duration::from_secs(SESSION_SECS + 1);
-        s.check(&t, 하루뒤);
+        s.check(&t, 하루뒤, SystemTime::UNIX_EPOCH);
         assert_eq!(s.len(), 0);
+    }
+
+    #[test]
+    fn 기준_시각보다_먼저_발급된_세션은_막는다() {
+        let s = Sessions::default();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let t = s.issue(now).unwrap();
+        assert!(s.check(&t, now, now));
+        assert!(!s.check(&t, now, now + Duration::from_secs(1)));
+    }
+
+    /// 빌린 기기에 남은 세션을 끊는 방법이 비밀번호 변경이다. 그런데 세션은 serve
+    /// 프로세스 메모리에 있어 passwd가 닿지 못한다 — auth.json이 바뀐 시각으로 가른다.
+    #[test]
+    fn 비밀번호를_바꾸면_기존_세션이_끝난다() {
+        let dir = tempfile::tempdir().unwrap();
+        set_password_at(dir.path(), "첫번째비밀번호입니다").unwrap();
+        let s = Sessions::default();
+        let t = s.issue(SystemTime::now()).unwrap();
+        let now = SystemTime::now();
+        assert!(s.check(&t, now, sessions_valid_since(dir.path(), now)));
+
+        std::thread::sleep(Duration::from_millis(20));
+        set_password_at(dir.path(), "두번째비밀번호입니다").unwrap();
+        let now = SystemTime::now();
+        assert!(!s.check(&t, now, sessions_valid_since(dir.path(), now)));
+    }
+
+    /// 하루에 한 번씩 쓰면 만료가 계속 밀려 영원히 산다. 발급부터 7일이 상한이다.
+    #[test]
+    fn 계속_써도_칠_일이_지나면_끝난다() {
+        let dir = tempfile::tempdir().unwrap();
+        set_password_at(dir.path(), "첫번째비밀번호입니다").unwrap();
+        let issued = SystemTime::now();
+        let 팔일뒤 = issued + Duration::from_secs(8 * 86_400);
+        assert!(sessions_valid_since(dir.path(), 팔일뒤) > issued);
+    }
+
+    #[test]
+    fn 비밀번호_파일이_없으면_어떤_세션도_받지_않는다() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        assert_eq!(sessions_valid_since(dir.path(), now), now);
+    }
+
+    #[test]
+    fn 로그아웃한_토큰은_막는다() {
+        let s = Sessions::default();
+        let now = SystemTime::UNIX_EPOCH;
+        let t = s.issue(now).unwrap();
+        s.revoke(&t);
+        assert!(!s.check(&t, now, now));
+    }
+
+    /// 실패한 주소를 지우지 않으면, 주소를 바꿔 가며 틀리는 쪽에 맞춰 기록이 쌓이기만 한다.
+    #[test]
+    fn 잠금이_끝난_주소는_기록에서_지운다() {
+        let g = Gate::default();
+        let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        g.note_failure("1.1.1.1", t0);
+        g.note_failure("2.2.2.2", t0 + Duration::from_secs(LOCK_SECS + 1));
+        assert_eq!(g.tracked(), 1);
     }
 
     #[test]
